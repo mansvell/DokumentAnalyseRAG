@@ -1,0 +1,15 @@
+project_name: rag_politik_projekt
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  chunks_dir: data/chunks
+  metadata_dir: data/metadata
+  vector_db_dir: db/vector_store
+chunking:
+  chunk_size: 1200
+  chunk_overlap: 150
+retrieval:
+  top_k: 4
+llm:
+  provider: ollama
+  model: llama3
