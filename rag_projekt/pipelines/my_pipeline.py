@@ -337,40 +337,23 @@ class Pipeline:
             response += "\n\nQuellen:\n- " + "\n- ".join(unique_sources)
         return response
 
-    def _is_help_request(self, usermessage):
-        msgfilter = usermessage.lower()
 
-        keywords=[
-            'was ist deine Rolle',
-            'wozu dienst du',
-            'hilfe',
-            'help',
-            'wie funktionierst du' ,
-            'wer bist du',
-            'was machst du',
-            'was kannst du'
-        ]
-        return any (keyword in msgfilter for keyword in keywords)
 
-    def _classify_intent(self, user_message: str) -> str:
-        """
-        Klassifiziert die Nutzerfrage, bevor Retrieval ausgeführt wird.
-        Dadurch werden allgemeine Fragen nicht fälschlich an die Dokumente geschickt.
-        """
+    def _classify_intent(self, user_message: str) -> str: #Klassifiziert die Nutzerfrage, bevor Retrieval ausgeführt wird
 
         prompt = f"""
-    Klassifiziere die folgende Nutzerfrage in genau eine Kategorie.
-
-    Kategorien:
-    - SYSTEM_HELP: Frage über dich, deine Rolle, deine Funktionen oder Hilfe.
-    - VORGANG: Nutzer möchte einen politischen Vorgang, Verlauf oder eine Entwicklung verfolgen oder wissen, wie sich ein Thema entwickelt hat.
-    - DOCUMENT_QA: Nutzer stellt eine inhaltliche Frage zu politischen Dokumenten, Gesetzen oder Bundestag.
-
-    Antworte nur mit einer Kategorie: SYSTEM_HELP, VORGANG oder DOCUMENT_QA.
-
-    Frage:
-    {user_message}
-    """
+            Klassifiziere die folgende Nutzerfrage in genau eine Kategorie.
+        
+            Kategorien:
+            - SYSTEM_HELP: Frage über dich, deine Rolle, deine Funktionen oder Hilfe.
+            - VORGANG: Nutzer möchte einen politischen Vorgang, Verlauf oder eine Entwicklung verfolgen oder wissen, wie sich ein Thema entwickelt hat.
+            - DOCUMENT_QA: Nutzer stellt eine inhaltliche Frage zu politischen Dokumenten, Gesetzen oder Bundestag.
+        
+            Antworte nur mit einer Kategorie: SYSTEM_HELP, VORGANG oder DOCUMENT_QA.
+        
+            Frage:
+            {user_message}
+        """
 
         try:
             intent = self.llm.invoke(prompt).strip().upper()
