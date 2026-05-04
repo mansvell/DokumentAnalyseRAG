@@ -281,31 +281,50 @@ class Pipeline:
         Wichtig:
         Zu diesem Vorgang liegt nur ein Dokument vor.
         Deshalb darfst du keine vollständige zeitliche Entwicklung behaupten.
-        Erkläre stattdessen den Inhalt des Dokuments und sage klar,
-        dass eine echte Entwicklung im Zeitverlauf anhand der vorhandenen Daten nicht erkennbar ist.
-        """
+        
+        Beschreibe stattdessen:
+        - den Inhalt des Dokuments
+        - die wichtigsten Punkte
+        - und weise klar darauf hin, dass keine zeitliche Entwicklung erkennbar ist.
+                """
+            structure_instruction= """
+        Strukturiere deine Antwort wie folgt:
+        1. Inhalt des Dokuments
+        2. Wichtige Punkte
+        3. Einschätzung 
+
+        Wichtig:
+        Es gibt keine zeitliche Entwicklung.
+                    """
         else:
             mode_instruction = """
         Wichtig:
         Zu diesem Vorgang liegen mehrere Dokumente vor.
-        Beschreibe die Entwicklung chronologisch anhand der Dokumente.
+        Ordne die Informationen strikt chronologisch nach Datum.
         """
+            structure_instruction = """
+        Strukturiere deine Antwort IMMER wie folgt:
+        1. Beginn: (Beschreibe das erste Dokument und den Ausgangspunkt)
+        2. Entwicklung: (Beschreibe die weiteren Dokumente chronologisch Schritt für Schritt: Zuerst, Dann,Anschließend)
+        3. Veränderungen: (Beschreibe, ob sich Inhalte, Positionen oder Regelungen geändert haben)
+        4. Aktueller Stand: (Beschreibe den aktuellen Stand basierend auf dem letzten Dokument) 
+        
+        Wichtig:
+        - Verwende nur Informationen aus den Dokumenten.
+        - Erfinde keine Informationen. """
+
 
         prompt = f"""
         Du bist ein KI-Assistent für politische Dokumentenanalyse.
-        Entwickelt von Mansvell Nkwanga
+        
         Der Nutzer möchte einen politischen Vorgang im Zeitverlauf verstehen.
         
         {mode_instruction}
         
         Nutze nur die folgende chronologisch sortierte Liste von Dokumenten und ihren Inhalten.
-        Beschreibe kurz, sachlich und klar:
-        - wie der Vorgang begonnen hat,
-        - welche wichtigen Entwicklungen erkennbar sind,
-        - ob sich Forderungen, Positionen oder Entscheidungen verändert haben,
-        - was der aktuelle Stand ist, soweit aus den Dokumenten erkennbar.
+        {structure_instruction}
         
-        Wenn die Informationen nicht ausreichen, sage das offen.
+        Wenn die Informationen nicht ausreichen, sage das klar.
         Antworte auf Deutsch.
         
         Vorgang:
