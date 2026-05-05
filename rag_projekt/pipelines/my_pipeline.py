@@ -367,10 +367,11 @@ class Pipeline:
         
             Kategorien:
             - SYSTEM_HELP: Frage über dich, deine Rolle, deine Funktionen oder Hilfe.
-            - VORGANG: Nutzer möchte einen politischen Vorgang, Verlauf oder eine Entwicklung verfolgen oder wissen, wie sich ein Thema entwickelt hat.
             - DOCUMENT_QA: Nutzer stellt eine inhaltliche Frage zu politischen Dokumenten, Gesetzen oder Bundestag.
-        
-            Antworte nur mit einer Kategorie: SYSTEM_HELP, VORGANG oder DOCUMENT_QA.
+            - VORGANG: Nutzer möchte einen politischen Vorgang, Verlauf oder eine Entwicklung verfolgen, wie sich ein Thema entwickelt hat.
+            - ZUSAMMENFASSUNG: Nutzer möchte nur eine Zusammenfassung eines Dokuments haben.
+            
+            Antworte nur mit einer Kategorie: SYSTEM_HELP, VORGANG , DOCUMENT_QA oder ZUSAMMENFASSUNG.
         
             Frage:
             {user_message}
@@ -385,11 +386,15 @@ class Pipeline:
                 return "VORGANG"
             if "DOCUMENT_QA" in intent:
                 return "DOCUMENT_QA"
+            if "ZUSAMMENFASSUNG" in intent:
+                return "ZUSAMMENFASSUNG"
 
         except Exception:
             pass
 
         return "DOCUMENT_QA"
+
+
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict):
         try:
@@ -397,7 +402,7 @@ class Pipeline:
                 self._init_components()
 
             intent = self._classify_intent(user_message)
-            if intent == "SYSTEM_HELP":
+            if intent == "SYSTEM_HELP":     #Hilfe für Nutzer
                 return """
                     Ich bin ein KI-Assistent für politische Dokumentenanalyse.
 
@@ -410,11 +415,15 @@ class Pipeline:
             if intent == "VORGANG":      #vorgg
                 return self._handle_vorgang_request(user_message)
 
+            if intent =="ZUSAMMENFASSUNG":
+                kk= 7
+            else:
+                kk = self.valves.TOP_K
+
             results = self.db.similarity_search(
                 user_message,
-                k=self.valves.TOP_K
+                k=kk
             )
-
 
             #Die Chunks werden nummeriert, damit das LLM diejenigen angeben kann, die es verwendet
             numbered_context_parts = []
@@ -425,31 +434,61 @@ class Pipeline:
 
             context = "\n\n".join(numbered_context_parts)
 
-            prompt = f"""
+            if intent == "ZUSAMMENFASSUNG":
+                prompt = f"""
             Du bist ein KI-Assistent für politische Dokumentenanalyse.
-        
-            Beantworte die Frage nur auf Basis des bereitgestellten Kontexts.
-            Wenn die Information im Kontext nicht enthalten ist, antworte genau:
-            "Ich habe im bereitgestellten Kontext keine ausreichende Information gefunden."
-            
-            - Gib nach deiner Antwort in einer neuen Zeile genau dieses Format zurück:
+
+            Deine Aufgabe ist es, das relevante Dokument bzw. die relevanten Dokumentstellen kurz und klar zusammenzufassen.
+
+            Strukturiere deine Antwort wie folgt:
+
+            1. Thema des Dokuments
+            2. Wichtige Inhalte
+            3. Ziel oder Zweck des Dokuments
+
+            Wichtig:
+            - Verwende nur die Informationen aus dem Kontext.
+            - Erfinde nichts.
+            - Schreibe klar und verständlich.
+            - Gib am Ende genau dieses Format zurück:
             GENUTZTE_QUELLEN: [Nummern]
-            - Beispiel: GENUTZTE_QUELLEN: 1 oder GENUTZTE_QUELLEN: 1,2
-            - Nenne nur die Nummern der Quellen, die du wirklich für die Antwort benutzt hast.
-            - Antworte kurz, präzise und auf Deutsch.
-        
+            - Beispiel: GENUTZTE_QUELLEN: 1,3
+            - Nenne nur Quellen, die du wirklich verwendet hast.
+
             Kontext:
             {context}
 
-            Frage:
+            Anfrage:
             {user_message}
-        
+
             Antwort:
             """
+            else :
+                prompt = f"""
+                Du bist ein KI-Assistent für politische Dokumentenanalyse.
+            
+                Beantworte die Frage nur auf Basis des bereitgestellten Kontexts.
+                Wenn die Information im Kontext nicht enthalten ist, antworte genau:
+                "Ich habe im bereitgestellten Kontext keine ausreichende Information gefunden."
+                
+                - Gib nach deiner Antwort in einer neuen Zeile genau dieses Format zurück:
+                GENUTZTE_QUELLEN: [Nummern]
+                - Beispiel: GENUTZTE_QUELLEN: 1 oder GENUTZTE_QUELLEN: 1,2
+                - Nenne nur die Nummern der Quellen, die du wirklich für die Antwort benutzt hast.
+                - Antworte kurz, präzise und auf Deutsch.
+            
+                Kontext:
+                {context}
+    
+                Frage:
+                {user_message}
+            
+                Antwort:
+                """
 
             response = self.llm.invoke(prompt)
 
-            #ich extrahiere die Verwendete Quellennummern aus der Antwort
+            #ich extrahiere die Verwendeten Quellennummern aus der Antwort
             used_indices = []
 
             marker = "GENUTZTE_QUELLEN:"
