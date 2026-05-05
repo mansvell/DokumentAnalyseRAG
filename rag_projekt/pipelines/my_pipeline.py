@@ -301,27 +301,31 @@ class Pipeline:
         Wichtig:
         Zu diesem Vorgang liegen mehrere Dokumente vor.
         Ordne die Informationen strikt chronologisch nach Datum.
+        - Verwende NUR Informationen aus den Dokumenten.
+        - Verwende ALLE bereitgestellten Dokumente.
+        - Jedes Dokument muss mindestens einmal in der Antwort vorkommen.
         """
             structure_instruction = """
-        Strukturiere deine Antwort IMMER wie folgt:
-        1. Beginn: (Beschreibe das erste Dokument und den Ausgangspunkt)
-        2. Entwicklung: (Beschreibe die weiteren Dokumente chronologisch Schritt für Schritt: Zuerst, Dann,Anschließend)
-        3. Veränderungen: (Beschreibe, ob sich Inhalte, Positionen oder Regelungen geändert haben)
-        4. Aktueller Stand: (Beschreibe den aktuellen Stand basierend auf dem letzten Dokument) 
+        Deine Antwort MUSS folgende Punkte enthalten:
         
-        Wichtig:
-        - Verwende nur Informationen aus den Dokumenten.
-        - Erfinde keine Informationen. """
-
+        - Beginn: Wie und wann hat der Vorgang begonnen ?
+           
+        - Entwicklung: Beschreibe die weiteren Dokumente chronologisch Schritt für Schritt: Zuerst, Dann,Anschließend).
+        
+        - Veränderungen: Welche Inhalte, Auschlüsse oder Regelungen im Vorgang haben sich geändert ?
+        
+        - Aktueller Stand: Was ist der aktuelle Stand des Vorgangs basierend auf dem letzten Dokument ? 
+        """
 
         prompt = f"""
         Du bist ein KI-Assistent für politische Dokumentenanalyse.
-        
+    
         Der Nutzer möchte einen politischen Vorgang im Zeitverlauf verstehen.
         
         {mode_instruction}
         
         Nutze nur die folgende chronologisch sortierte Liste von Dokumenten und ihren Inhalten.
+        
         {structure_instruction}
         
         Wenn die Informationen nicht ausreichen, sage das klar.
@@ -357,9 +361,7 @@ class Pipeline:
         return response
 
 
-
     def _classify_intent(self, user_message: str) -> str: #Klassifiziert die Nutzerfrage, bevor Retrieval ausgeführt wird
-
         prompt = f"""
             Klassifiziere die folgende Nutzerfrage in genau eine Kategorie.
         
