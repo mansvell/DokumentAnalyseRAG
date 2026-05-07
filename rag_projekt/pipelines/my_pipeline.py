@@ -16,7 +16,7 @@ class Pipeline:
             description="Pfad zur Chroma-Vektordatenbank im Container"
         )
         LLM_MODEL: str = Field(
-            default="llama3.2:3b" ,  # llama3.2:3b", gemma3:1b gemma3n:e2b
+            default="gemma4:e2b" ,  # qwen3.5:0.8b llama3.2:3b, gemma3:1b gemma3n:e2b
             description="Ollama-Modellname"
         )
         OLLAMA_BASE_URL: str = Field(
@@ -24,7 +24,7 @@ class Pipeline:
             description="Ollama-Basis-URL aus dem Container"
         )
         TOP_K: int = Field(
-            default=3,
+            default=4,
             description="Anzahl der abgerufenen Chunks"
         )
         SQLITE_DB_PATH: str = Field(  #Vorgg
@@ -363,18 +363,42 @@ class Pipeline:
 
     def _classify_intent(self, user_message: str) -> str: #Klassifiziert die Nutzerfrage, bevor Retrieval ausgeführt wird
         prompt = f"""
-            Klassifiziere die folgende Nutzerfrage in genau eine Kategorie.
+        Klassifiziere die folgende Nutzerfrage in genau eine Kategorie.
+
+        Kategorien:
+
+        SYSTEM_HELP:
+        Frage über dich, deine Rolle oder deine Funktionen.
         
-            Kategorien:
-            - SYSTEM_HELP: Frage über dich, deine Rolle, deine Funktionen oder Hilfe.
-            - DOCUMENT_QA: Nutzer stellt eine inhaltliche Frage zu politischen Dokumenten, Gesetzen oder Bundestag.
-            - VORGANG: Nutzer möchte einen politischen Vorgang, Verlauf oder eine Entwicklung verfolgen, wie sich ein Thema entwickelt hat.
-            - ZUSAMMENFASSUNG: Nutzer möchte nur eine Zusammenfassung eines Dokuments haben.
-            
-            Antworte nur mit einer Kategorie: SYSTEM_HELP, VORGANG , DOCUMENT_QA oder ZUSAMMENFASSUNG.
+        DOCUMENT_QA:
+        Alle normalen inhaltlichen Fragen zu Dokumenten, Parteien, Positionen, Bundestag, Gesetzen oder Themen.
+        Auch Fragen wie:
+        - Wie positioniert sich die SPD ...?
+        - Was sagt die Bundesregierung zu ...?
+        - Welche Forderungen stellt die Fraktion ...?
+
+        VORGANG:
+        Nur wenn der Nutzer ausdrücklich einen Verlauf, eine Entwicklung oder einen politischen Vorgang im Zeitverlauf verstehen möchte.
+        Beispiele:
+        - Verfolge den Vorgang ...
+        - Wie hat sich das Thema entwickelt?
+        - Zeige den Verlauf dieses Vorgangs
+        - Was ist der aktuelle Stand nach mehreren Dokumenten?
         
-            Frage:
-            {user_message}
+        ZUSAMMENFASSUNG:
+        Der Nutzer möchte ein Dokument zusammenfassen.
+        Beispiele:
+        - Fasse dieses Dokument zusammen
+        - Gib mir eine Zusammenfassung
+
+        Wichtig:
+        Wenn keine zeitliche Entwicklung ausdrücklich verlangt wird, wähle DOCUMENT_QA.
+
+        Antworte nur mit:
+        SYSTEM_HELP, DOCUMENT_QA, VORGANG oder ZUSAMMENFASSUNG.
+
+        Frage:
+        {user_message}
         """
 
         try:
@@ -395,13 +419,18 @@ class Pipeline:
         return "DOCUMENT_QA"
 
 
-
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict):
         try:
             if self.embedding is None or self.db is None or self.llm is None:
                 self._init_components()
 
+            if user_message.strip().startswith("### Task:"):   #Bloc usermessage von OPENWBUI
+                return ""
+
             intent = self._classify_intent(user_message)
+            print("USER MESSAGE:", user_message)
+            print("CLASSIFIED INTENT:", intent)
+
             if intent == "SYSTEM_HELP":     #Hilfe für Nutzer
                 return """
                     Ich bin ein KI-Assistent für politische Dokumentenanalyse.
@@ -420,17 +449,44 @@ class Pipeline:
             else:
                 kk = self.valves.TOP_K
 
-            results = self.db.similarity_search(
-                user_message,
-                k=kk
-            )
+            results = self.db.similarity_search(user_message, k=kk)
+
+            print("===== RETRIEVAL DEBUG =====")
+            for i, r in enumerate(results, start=1):
+                metadata = r.metadata if hasattr(r, "metadata") else {}
+                content = r.page_content if hasattr(r, "page_content") else ""
+
+                print(f"\n--- RESULT {i} ---")
+                print("Titel:", metadata.get("titel"))
+                print("Seite:", metadata.get("page_number"))
+                print(content[:800])
 
             #Die Chunks werden nummeriert, damit das LLM diejenigen angeben kann, die es verwendet
             numbered_context_parts = []
             for i, r in enumerate(results, start=1):
+                #content = r.page_content if hasattr(r, "page_content") else str(r)
+                #numbered_context_parts.append(f"[Quelle {i}]\n{content}")
                 content = r.page_content if hasattr(r, "page_content") else str(r)
-                numbered_context_parts.append(f"[Quelle {i}]\n{content}")
+                metadata = r.metadata if hasattr(r, "metadata") else {}
 
+                titel = metadata.get("titel", "Ohne Titel")
+                datum = metadata.get("datum", "kein Datum")
+                doc_type = metadata.get("doc_type", "unbekannt")
+                page_number = metadata.get("page_number", "unbekannt")
+                pdf_url = metadata.get("pdf_url", "")
+
+                # So kann das LLM besser erkennen, welche Quelle zu welchem Inhalt gehört.
+                numbered_context_parts.append(f"""
+                [Quelle {i}]
+                Titel: {titel}
+                Datum: {datum}
+                Typ: {doc_type}
+                Seite: {page_number}
+                PDF: {pdf_url}
+
+                Inhalt:
+                {content}
+                """)
 
             context = "\n\n".join(numbered_context_parts)
 
@@ -466,27 +522,41 @@ class Pipeline:
             else :
                 prompt = f"""
                 Du bist ein KI-Assistent für politische Dokumentenanalyse.
-            
-                Beantworte die Frage nur auf Basis des bereitgestellten Kontexts.
-                Wenn die Information im Kontext nicht enthalten ist, antworte genau:
+
+                AUFGABE:
+                Beantworte die Frage ausschließlich auf Basis des bereitgestellten Kontexts.
+
+                WICHTIGE REGELN:
+                - Verwende keine Informationen außerhalb des Kontexts.
+                - Wenn der Kontext die Frage nicht direkt beantwortet, antworte genau:
                 "Ich habe im bereitgestellten Kontext keine ausreichende Information gefunden."
-                
-                - Gib nach deiner Antwort in einer neuen Zeile genau dieses Format zurück:
-                GENUTZTE_QUELLEN: [Nummern]
-                - Beispiel: GENUTZTE_QUELLEN: 1 oder GENUTZTE_QUELLEN: 1,2
-                - Nenne nur die Nummern der Quellen, die du wirklich für die Antwort benutzt hast.
+                - Verwende nur Quellen, deren Inhalt die Antwort direkt belegt.
+                - Achte besonders auf Titel, Seite und Inhalt der Quelle.
+                - Wenn mehrere Quellen thematisch ähnlich sind, wähle nur die wirklich passende Quelle.
                 - Antworte kurz, präzise und auf Deutsch.
-            
-                Kontext:
+                - Du MUSST immer eine Antwort UND GENUTZTE_QUELLEN zurückgeben.
+                
+                AUSGABEFORMAT:
+                
+                ANTWORT:
+                [Antwort steht hier]
+                
+                GENUTZTE_QUELLEN: [Nummern]
+                Beispiel:
+                GENUTZTE_QUELLEN: 2,4 
+
+                KONTEXT:
                 {context}
-    
-                Frage:
+
+                FRAGE:
                 {user_message}
-            
-                Antwort:
+
+                ANTWORT:
                 """
 
             response = self.llm.invoke(prompt)
+            print("===== RAW LLM RESPONSE =====")
+            print(response)
 
             #ich extrahiere die Verwendeten Quellennummern aus der Antwort
             used_indices = []
@@ -505,13 +575,24 @@ class Pipeline:
                         if 1 <= idx <= len(results):
                             used_indices.append(idx)
 
-                response = answer_text
-            else:
-                #Sollte das Modell das Format nicht einhalten, nur die erste Quelle nehmen
-                used_indices = [1]
+                response = answer_text.replace("ANTWORT:", "").strip()
 
-            sources = []
-            seen_sources = set()
+                if not response: #Falls das Modell keine Antwort erzeugt:
+                    response = "Die Information wurde im Kontext gefunden, aber das Modell konnte keine klare Antwort formulieren."
+
+                if "keine ausreichende information" in response.lower():
+                    return response
+            else:
+                #Sollte das Modell das Format nicht einhalten, nichts anzeigen
+                used_indices = []
+
+            if "keine ausreichende information" in response.lower(): #falls das LLM nicht den Marker schreibt
+                return response
+
+            if not used_indices:
+                return response
+
+            grouped_sources = {}
 
             for idx in used_indices:
                 r = results[idx - 1]
@@ -523,21 +604,31 @@ class Pipeline:
                 page_number = metadata.get("page_number", "unbekannt")
                 pdf_url = metadata.get("pdf_url", "")
 
-                unique_key = (titel, datum, page_number, pdf_url)
-                if unique_key not in seen_sources:
-                    seen_sources.add(unique_key)
+                unique_key = (titel, datum, doc_type, pdf_url) #pro Dok grupp
 
-                    source_text = (
+                if unique_key not in grouped_sources:
+                        grouped_sources[unique_key] = set()
+                    #seen_sources.add(unique_key)
+                if page_number is not None:
+                    grouped_sources[unique_key].add(str(page_number))
+            sources = []
+
+            for (titel, datum, doc_type, pdf_url), pages in grouped_sources.items():
+                pages_sorted = sorted(pages, key=lambda x: int(x) if x.isdigit() else x)
+
+                pages_text = ", ".join(pages_sorted) if pages else "unbekannt" #Seite zusamlgen
+
+                source_text = (
                         f"Titel: {titel} | "
                         f"Datum: {datum} | "
                         f"Typ: {doc_type} | "
-                        f"Seite: {page_number}"
+                        f"Seite: {pages_text}"
                     )
 
-                    if pdf_url:
+                if pdf_url:
                         source_text += f" | PDF: {pdf_url}"
 
-                    sources.append(source_text)
+                sources.append(source_text)
             if sources:
                 response += "\n\nQuellen:\n- " + "\n- ".join(sources)
 
