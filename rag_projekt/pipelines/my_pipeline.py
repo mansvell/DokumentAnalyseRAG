@@ -4,6 +4,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import OllamaLLM
 import sqlite3
+import time
 
 class Pipeline:
     class Valves(BaseModel):
@@ -16,7 +17,7 @@ class Pipeline:
             description="Pfad zur Chroma-Vektordatenbank im Container"
         )
         LLM_MODEL: str = Field(
-            default="gemma4:e2b" ,  # qwen3.5:0.8b llama3.2:3b, gemma3:1b gemma3n:e2b
+            default="gemma4:e2b" ,  # qwen3.5:0.8b llama3.2:3b, gemma4:e2b gemma3n:e2b
             description="Ollama-Modellname"
         )
         OLLAMA_BASE_URL: str = Field(
@@ -24,7 +25,7 @@ class Pipeline:
             description="Ollama-Basis-URL aus dem Container"
         )
         TOP_K: int = Field(
-            default=4,
+            default=5,
             description="Anzahl der abgerufenen Chunks"
         )
         SQLITE_DB_PATH: str = Field(  #Vorgg
@@ -51,7 +52,7 @@ class Pipeline:
 
         self.llm = OllamaLLM(
             model=self.valves.LLM_MODEL,
-            base_url=self.valves.OLLAMA_BASE_URL
+            base_url=self.valves.OLLAMA_BASE_URL,
         )
         self.vorgang_db = Chroma(
             persist_directory="/app/db/vector_store_vorgaenge",
@@ -362,6 +363,8 @@ class Pipeline:
 
 
     def _classify_intent(self, user_message: str) -> str: #Klassifiziert die Nutzerfrage, bevor Retrieval ausgeführt wird
+        classify_start = time.perf_counter()
+
         prompt = f"""
         Klassifiziere die folgende Nutzerfrage in genau eine Kategorie.
 
@@ -403,6 +406,7 @@ class Pipeline:
 
         try:
             intent = self.llm.invoke(prompt).strip().upper()
+            print("INTENT LLM TIME:", round(time.perf_counter() - classify_start, 2), "s")
 
             if "SYSTEM_HELP" in intent:
                 return "SYSTEM_HELP"
@@ -416,18 +420,22 @@ class Pipeline:
         except Exception:
             pass
 
+        print("INTENT LLM TIME:", round(time.perf_counter() - classify_start, 2), "s")
         return "DOCUMENT_QA"
 
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict):
         try:
+            total_start = time.perf_counter()
             if self.embedding is None or self.db is None or self.llm is None:
                 self._init_components()
 
             if user_message.strip().startswith("### Task:"):   #Bloc usermessage von OPENWBUI
                 return ""
 
+            intent_start = time.perf_counter()
             intent = self._classify_intent(user_message)
+            print("INTENT TIME:", round(time.perf_counter() - intent_start, 2), "s")
             print("USER MESSAGE:", user_message)
             print("CLASSIFIED INTENT:", intent)
 
@@ -449,7 +457,15 @@ class Pipeline:
             else:
                 kk = self.valves.TOP_K
 
-            results = self.db.similarity_search(user_message, k=kk)
+            #results = self.db.similarity_search(user_message, k=kk)
+            retrieval_start = time.perf_counter()
+            results = self.db.max_marginal_relevance_search(
+                user_message,
+                k=kk,
+                fetch_k=40,
+                lambda_mult=0.9
+            )
+            print("RETRIEVAL TIME:", round(time.perf_counter() - retrieval_start, 2), "s")
 
             print("===== RETRIEVAL DEBUG =====")
             for i, r in enumerate(results, start=1):
@@ -462,6 +478,7 @@ class Pipeline:
                 print(content[:800])
 
             #Die Chunks werden nummeriert, damit das LLM diejenigen angeben kann, die es verwendet
+            context_start = time.perf_counter()
             numbered_context_parts = []
             for i, r in enumerate(results, start=1):
                 #content = r.page_content if hasattr(r, "page_content") else str(r)
@@ -489,6 +506,7 @@ class Pipeline:
                 """)
 
             context = "\n\n".join(numbered_context_parts)
+            print("CONTEXT BUILD TIME:", round(time.perf_counter() - context_start, 2), "s")
 
             if intent == "ZUSAMMENFASSUNG":
                 prompt = f"""
@@ -553,12 +571,14 @@ class Pipeline:
 
                 ANTWORT:
                 """
-
+            llm_start = time.perf_counter()
             response = self.llm.invoke(prompt)
+            print("LLM TIME:", round(time.perf_counter() - llm_start, 2), "s")
             print("===== RAW LLM RESPONSE =====")
             print(response)
 
             #ich extrahiere die Verwendeten Quellennummern aus der Antwort
+            source_start = time.perf_counter()
             used_indices = []
 
             marker = "GENUTZTE_QUELLEN:"
@@ -632,6 +652,8 @@ class Pipeline:
             if sources:
                 response += "\n\nQuellen:\n- " + "\n- ".join(sources)
 
+            print("SOURCE PROCESSING TIME:", round(time.perf_counter() - source_start, 2), "s")
+            print("TOTAL TIME:", round(time.perf_counter() - total_start, 2), "s")
             return response
 
         except Exception as e:
