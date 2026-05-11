@@ -25,7 +25,7 @@ class Pipeline:
             description="Ollama-Basis-URL aus dem Container"
         )
         TOP_K: int = Field(
-            default=5,
+            default=4,
             description="Anzahl der abgerufenen Chunks"
         )
         SQLITE_DB_PATH: str = Field(  #Vorgg
@@ -52,7 +52,7 @@ class Pipeline:
 
         self.llm = OllamaLLM(
             model=self.valves.LLM_MODEL,
-            base_url=self.valves.OLLAMA_BASE_URL,
+            base_url=self.valves.OLLAMA_BASE_URL
         )
         self.vorgang_db = Chroma(
             persist_directory="/app/db/vector_store_vorgaenge",
@@ -79,31 +79,6 @@ class Pipeline:
             }
         ]
 
-    def _is_vorgang_request (self, user_message: str) -> bool:
-        #Prüft grob, ob der Nutzer einen Vorgang im Zeitverlauf verfolgen möchte
-        text = user_message.lower()
-
-        keywords = [  #  Vorgang aufdecken
-            "vorgang",
-            "verfolge",
-            "verlauf",
-            "verlaufen",
-            "im zeitverlauf",
-            "entwicklung",
-            "im laufe der zeit",
-            "timeline",
-            "entwickelt",
-            "verfolgung"
-        ]
-        return any(keyword in text for keyword in keywords)
-            #return True
-        #try:
-            #results = self.vorgang_db.similarity_search(user_message, k=1)
-            #if results:
-             #   return True
-        #except:
-         #   pass
-        #return False'''
 
     def _find_vorgang_semantic(self, user_message: str):
         #Suche nach den 3 besten Vorgängen via vector_db
@@ -361,65 +336,36 @@ class Pipeline:
             response += "\n\nQuellen:\n- " + "\n- ".join(unique_sources)
         return response
 
-
-    def _classify_intent(self, user_message: str) -> str: #Klassifiziert die Nutzerfrage, bevor Retrieval ausgeführt wird
+    def _classify_intent(self, user_message: str) -> str:
         classify_start = time.perf_counter()
+        text = user_message.lower()
 
-        prompt = f"""
-        Klassifiziere die folgende Nutzerfrage in genau eine Kategorie.
+        system_keywords = [
+            "ich brauche hilfe", "was kannst du", "wer bist du", "wozu dienst du", "wozu du dienst", "dein Ziel" , "deine Rolle"
+            "wie funktionierst du","wie du funktionierst", "wie kann ich dich benutzen", "dich benutzen", "kannst du mir helfen", "hilf mir"
+        ]
 
-        Kategorien:
+        summary_keywords= [
+            "zusammenfassung", "fasse", "zusammenfassen",
+            "kurz zusammen", "resümee", "fasse zusammen"
+        ]
 
-        SYSTEM_HELP:
-        Frage über dich, deine Rolle oder deine Funktionen.
-        
-        DOCUMENT_QA:
-        Alle normalen inhaltlichen Fragen zu Dokumenten, Parteien, Positionen, Bundestag, Gesetzen oder Themen.
-        Auch Fragen wie:
-        - Wie positioniert sich die SPD ...?
-        - Was sagt die Bundesregierung zu ...?
-        - Welche Forderungen stellt die Fraktion ...?
+        vorgang_keywords =[
+            "vorgang", "verlauf", "entwicklung", "timeline", "wie hat sich das Thema"
+            "verfolge", "im zeitverlauf", "aktueller stand", "chronologisch","im laufe der zeit", "timeline"
 
-        VORGANG:
-        Nur wenn der Nutzer ausdrücklich einen Verlauf, eine Entwicklung oder einen politischen Vorgang im Zeitverlauf verstehen möchte.
-        Beispiele:
-        - Verfolge den Vorgang ...
-        - Wie hat sich das Thema entwickelt?
-        - Zeige den Verlauf dieses Vorgangs
-        - Was ist der aktuelle Stand nach mehreren Dokumenten?
-        
-        ZUSAMMENFASSUNG:
-        Der Nutzer möchte ein Dokument zusammenfassen.
-        Beispiele:
-        - Fasse dieses Dokument zusammen
-        - Gib mir eine Zusammenfassung
+        ]
 
-        Wichtig:
-        Wenn keine zeitliche Entwicklung ausdrücklich verlangt wird, wähle DOCUMENT_QA.
+        if any(k in text for k in system_keywords):
+            return "SYSTEM_HELP"
 
-        Antworte nur mit:
-        SYSTEM_HELP, DOCUMENT_QA, VORGANG oder ZUSAMMENFASSUNG.
+        if any(k in text for k in summary_keywords):
+            return "ZUSAMMENFASSUNG"
 
-        Frage:
-        {user_message}
-        """
+        if any(k in text for k in vorgang_keywords):
+            return "VORGANG"
 
-        try:
-            intent = self.llm.invoke(prompt).strip().upper()
-            print("INTENT LLM TIME:", round(time.perf_counter() - classify_start, 2), "s")
-
-            if "SYSTEM_HELP" in intent:
-                return "SYSTEM_HELP"
-            if "VORGANG" in intent:
-                return "VORGANG"
-            if "DOCUMENT_QA" in intent:
-                return "DOCUMENT_QA"
-            if "ZUSAMMENFASSUNG" in intent:
-                return "ZUSAMMENFASSUNG"
-
-        except Exception:
-            pass
-
+        # Fallback rapide et sûr
         print("INTENT LLM TIME:", round(time.perf_counter() - classify_start, 2), "s")
         return "DOCUMENT_QA"
 
@@ -433,6 +379,9 @@ class Pipeline:
             if user_message.strip().startswith("### Task:"):   #Bloc usermessage von OPENWBUI
                 return ""
 
+            if body.get("stream") is False: #vermeide, dass pipe() 2mal aufgerufen wird und 2 mal ergebnisse in docker logs liefert
+                return ""
+
             intent_start = time.perf_counter()
             intent = self._classify_intent(user_message)
             print("INTENT TIME:", round(time.perf_counter() - intent_start, 2), "s")
@@ -444,9 +393,9 @@ class Pipeline:
                     Ich bin ein KI-Assistent für politische Dokumentenanalyse.
 
                     Ich kann Ihnen helfen bei:
-                    - Fragen zu politischen Dokumenten (Was wurde über Energiewirtschaftsgesetz gesagt?)
-                    - Zusammenfassungen von Dokumenten (Fasse die wichtigsten Punkte dieses Dokuments zusammen)
-                    - dem Verfolgen politischer Vorgänge im Zeitverlauf (Verfolge den Vorgang zum Gas- und Wasserstoff-Binnenmarktpaket)
+                    - Fragen zu politischen Dokumenten (z.B: Was wurde über Energiewirtschaftsgesetz gesagt ?)
+                    - Zusammenfassungen von Dokumenten (z.B:Fasse die wichtigsten Punkte dieses Dokuments zusammen)
+                    - dem Verfolgen politischer Vorgänge im Zeitverlauf (z.B:Verfolge den Vorgang zum Gas- und Wasserstoff-Binnenmarktpaket)
                 """
 
             if intent == "VORGANG":      #vorgg
@@ -462,7 +411,7 @@ class Pipeline:
             results = self.db.max_marginal_relevance_search(
                 user_message,
                 k=kk,
-                fetch_k=40,
+                fetch_k=20,
                 lambda_mult=0.9
             )
             print("RETRIEVAL TIME:", round(time.perf_counter() - retrieval_start, 2), "s")
@@ -485,24 +434,13 @@ class Pipeline:
                 #numbered_context_parts.append(f"[Quelle {i}]\n{content}")
                 content = r.page_content if hasattr(r, "page_content") else str(r)
                 metadata = r.metadata if hasattr(r, "metadata") else {}
-
+                content = content[:800]
                 titel = metadata.get("titel", "Ohne Titel")
-                datum = metadata.get("datum", "kein Datum")
-                doc_type = metadata.get("doc_type", "unbekannt")
                 page_number = metadata.get("page_number", "unbekannt")
-                pdf_url = metadata.get("pdf_url", "")
 
                 # So kann das LLM besser erkennen, welche Quelle zu welchem Inhalt gehört.
                 numbered_context_parts.append(f"""
-                [Quelle {i}]
-                Titel: {titel}
-                Datum: {datum}
-                Typ: {doc_type}
-                Seite: {page_number}
-                PDF: {pdf_url}
-
-                Inhalt:
-                {content}
+                [Quelle {i}] Titel: {titel} Seite: {page_number}\n Inhalt: {content}
                 """)
 
             context = "\n\n".join(numbered_context_parts)
@@ -551,7 +489,7 @@ class Pipeline:
                 - Verwende nur Quellen, deren Inhalt die Antwort direkt belegt.
                 - Achte besonders auf Titel, Seite und Inhalt der Quelle.
                 - Wenn mehrere Quellen thematisch ähnlich sind, wähle nur die wirklich passende Quelle.
-                - Antworte kurz, präzise und auf Deutsch.
+                - Antworte kurz und auf Deutsch.
                 - Du MUSST immer eine Antwort UND GENUTZTE_QUELLEN zurückgeben.
                 
                 AUSGABEFORMAT:
@@ -571,9 +509,12 @@ class Pipeline:
 
                 ANTWORT:
                 """
+                print("PROMPT LENGTH:", len(prompt))
+
             llm_start = time.perf_counter()
             response = self.llm.invoke(prompt)
             print("LLM TIME:", round(time.perf_counter() - llm_start, 2), "s")
+
             print("===== RAW LLM RESPONSE =====")
             print(response)
 
