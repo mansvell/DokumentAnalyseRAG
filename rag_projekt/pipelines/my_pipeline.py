@@ -82,14 +82,26 @@ class Pipeline:
 
     def _find_vorgang_semantic(self, user_message: str):
         #Suche nach den 3 besten Vorgängen via vector_db
-        results = self.vorgang_db.similarity_search(user_message, k=3)
+        results = self.vorgang_db.similarity_search_with_score(user_message, k=3)
 
         if not results:
             return None
 
-        best = results[0]  #beste Ergebnisse
+        best_doc, best_score= results[0]  #beste Ergebnisse
 
-        metadata = best.metadata
+        print("===== VORGANG SEARCH DEBUG =====")
+        for doc, score in results:
+            print("Score:", score)
+            print("Titel:", doc.metadata.get("titel"))
+            print("-------------------------------")
+
+        MAX_DISTANCE = 0.75
+
+        if best_score > MAX_DISTANCE:
+            print(f"Kein sicherer Vorgang gefunden. Bester Score: {best_score}")
+            return None
+
+        metadata = best_doc.metadata
 
         return (     #Metadaten aufrufen
             metadata.get("vorgang_id"),
@@ -341,18 +353,18 @@ class Pipeline:
         text = user_message.lower()
 
         system_keywords = [
-            "ich brauche hilfe", "was kannst du", "wer bist du", "wozu dienst du", "wozu du dienst", "dein Ziel" , "deine Rolle"
+            "ich brauche hilfe", "was kannst du", "wer bist du", "wozu dienst du", "wozu du dienst", "dein Ziel" , "deine Rolle",
             "wie funktionierst du","wie du funktionierst", "wie kann ich dich benutzen", "dich benutzen", "kannst du mir helfen", "hilf mir"
         ]
 
         summary_keywords= [
-            "zusammenfassung", "fasse", "zusammenfassen",
-            "kurz zusammen", "resümee", "fasse zusammen"
+            "zusammenfassung", "fasse kurz", "fasse" "zusammenfassen", "die wichtigen Inhalten", "die wichtigen Punkte", "die relevanten Punkte" ,
+            "kurz zusammen", "resümee", "fasse zusammen", "fasse dieses Dokuments zusammen", "wichtigsten Inhalten", "wichtigsten Punkte" , "relevantesten Punkte"
         ]
 
         vorgang_keywords =[
-            "vorgang", "verlauf", "entwicklung", "timeline", "wie hat sich das Thema"
-            "verfolge", "im zeitverlauf", "aktueller stand", "chronologisch","im laufe der zeit", "timeline"
+            "vorgang", "vorgangs", "verlauf", "entwicklung", "timeline", "wie hat sich das Thema"
+            "verfolge", "im zeitverlauf","aktuelle stand" "aktueller stand", "chronologisch","im laufe der zeit", "timeline"
 
         ]
 
@@ -402,7 +414,7 @@ class Pipeline:
                 return self._handle_vorgang_request(user_message)
 
             if intent =="ZUSAMMENFASSUNG":
-                kk= 7
+                kk= 6
             else:
                 kk = self.valves.TOP_K
 
@@ -450,7 +462,7 @@ class Pipeline:
                 prompt = f"""
             Du bist ein KI-Assistent für politische Dokumentenanalyse.
 
-            Deine Aufgabe ist es, das relevante Dokument bzw. die relevanten Dokumentstellen kurz und klar zusammenzufassen.
+            Deine Aufgabe ist es, das relevante Dokument kurz und klar zusammenzufassen.
 
             Strukturiere deine Antwort wie folgt:
 
@@ -461,6 +473,8 @@ class Pipeline:
             Wichtig:
             - Verwende nur die Informationen aus dem Kontext.
             - Erfinde nichts.
+            - Wenn der Kontext nicht direkt auf die Frage antwortet, antworte genau:
+            "Ich kann die gewünschte Zusammenfassung zu diesem Thema nicht erstellen, da der vorliegende Kontext keine spezifischen Informationen zu diesem Thema enthält. 
             - Schreibe klar und verständlich.
             - Gib am Ende genau dieses Format zurück:
             GENUTZTE_QUELLEN: [Nummern]
@@ -509,7 +523,8 @@ class Pipeline:
 
                 ANTWORT:
                 """
-                print("PROMPT LENGTH:", len(prompt))
+
+            print("PROMPT LENGTH:", len(prompt))
 
             llm_start = time.perf_counter()
             response = self.llm.invoke(prompt)
