@@ -87,21 +87,21 @@ class Pipeline:
         if not results:
             return None
 
-        best_doc, best_score= results[0]  #beste Ergebnisse
+        best_vorgang, best_score= results[0]  #beste Ergebnisse
 
         print("===== VORGANG SEARCH DEBUG =====")
-        for doc, score in results:
+        for titel, score in results:
             print("Score:", score)
-            print("Titel:", doc.metadata.get("titel"))
+            print("Titel:", titel.metadata.get("titel"))
             print("-------------------------------")
 
         MAX_DISTANCE = 0.75
 
-        if best_score > MAX_DISTANCE:
+        if best_score > MAX_DISTANCE: #vermeide ,dass ein falscher Vorgang zurückgegeben wird, falls die Top3 alle falsch sind
             print(f"Kein sicherer Vorgang gefunden. Bester Score: {best_score}")
             return None
 
-        metadata = best_doc.metadata
+        metadata = best_vorgang.metadata
 
         return (     #Metadaten aufrufen
             metadata.get("vorgang_id"),
@@ -127,61 +127,54 @@ class Pipeline:
         conn.close()
         return results
 
-    def _get_chunks_for_document_ids(self, document_ids: List[int]): #holt alle Chunks zu einer Liste von Dokument-IDs
+
+    #das sucht die relevantesten Chunks für die Nutzerfrage aber nur innerhalb der Dokumente des gefundenen Vorgangs
+    def _get_relevant_chunks_for_vorgang(self, user_message: str, document_ids: List[int], k: int = 12):
         if not document_ids:
             return []
 
-        conn = sqlite3.connect(self.valves.SQLITE_DB_PATH)
-        cursor = conn.cursor()
+        results = self.db.max_marginal_relevance_search(
+            user_message,
+            k=k,
+            fetch_k=40,
+            filter={"document_id": {"$in": document_ids}}
+        ) #40 Kandidaten dann 12 relevanteste davon
 
-        placeholders = ",".join(["?"] * len(document_ids)) #?,?,? abhängig von der Länge der Liste von Doks
-
-        cursor.execute(f"""
-            SELECT document_id, chunk_index, content, page_number
-            FROM chunks
-            WHERE document_id IN ({placeholders})
-            ORDER BY document_id ASC, chunk_index ASC
-        """, document_ids)
-
-        results = cursor.fetchall()
-        conn.close()
-        return results
-
-    #Sucht die relevantesten Chunks für die Nutzerfrage aber nur innerhalb der Dokumente des gefundenen Vorgangs
-    def _get_relevant_chunks_for_vorgang(self, user_message: str, document_ids: List[int], k: int = 15):
-        if not document_ids:
-            return []
-
-        results = self.db.similarity_search(user_message, k=20) #20 tout Dok confondu
-
-        filtered_results = []
+        print("====== CHUNK FILTERUNG ======")
+        print("verwendete dokument_ids:", document_ids)
 
         for r in results:
             metadata = r.metadata if hasattr(r, "metadata") else {}
-            doc_id = metadata.get("document_id")
+            print(
+                "doc_id:", metadata.get("document_id"),
+                "| page:", metadata.get("page_number"),
+                "| chunk:", metadata.get("chunk_id")
+            )
 
-            if doc_id in document_ids: #Filterung , Behaltung der chunks von entsprechendem Vorgang
-                filtered_results.append(r)
-
-            if len(filtered_results) >= k: #man stopt wenn man schon 8 hat
-                break
-
-        return filtered_results
+        return results
 
     #baut aus den Dokumenten + Chunks eine Vorgangs-Zusammenfassung
     def _handle_vorgang_request(self, user_message: str):
+        total_start= time.time()
+        t0= time.time()
         vorgang= self._find_vorgang_semantic(user_message)
+        print(f"VORGANG SEARCH TIME:{time.time() - t0:.2f} s")
 
         if not vorgang :
+            print(f"TOTAL TIME: {time.time() - total_start:.2f} s")
             return "Ich konnte leider keinen passenden Vorgang in der Datenbank finden"
 
         vorgang_id,dip_id,titel, vorgangstyp,datum_erstellt, datum_aktualisiert = vorgang
 
+        t0= time.time()
         documents =self._get_documents_for_vorgang(vorgang_id)  #Zugehörige Dokumente laden
+        print(f"VORG-DOCUMENT TIME: {time.time() - t0:.2f} s")
+        print(f"2. {len(documents)} Dokumente geladen")
 
         if not documents:
+            print(f"TOTAL TIME : {time.time() - total_start:.2f} s")
             return f"Zum Vorgang '{titel}' wurden keine verknüpften Dokumente gefunden"
-        print(f"2. {len(documents)} Dokumente geladen")
+
 
         if len(documents) == 1:
             analyse_mode = "single_document"
@@ -189,10 +182,13 @@ class Pipeline:
             analyse_mode = "timeline"
 
         document_ids  =[doc_id for doc_id, _, _, _, _ in documents]  #IDs der Dokumente sammeln [12,15]
+        t0= time.time()
         relevant_chunks = self._get_relevant_chunks_for_vorgang(user_message,document_ids, k=12) #Alle Chunks dieser Dokumente laden
+        print(f"CHUNKS RETRIVIAL TIME: {time.time() - t0:.2f} s")
         print(f"3. {len(relevant_chunks)} relevante Chunks gefunden")
 
         #Chunks pro Dok-id gruppieren [{"chunk_index": 0, "content": "...", "page_number": 1}, ...],
+        t0=time.time()
         chunks_by_doc = {}
 
         for r in relevant_chunks:
@@ -220,7 +216,7 @@ class Pipeline:
         for doc_id, doc_titel, datum, doc_type, pdf_url in documents:
             doc_chunks = chunks_by_doc.get(doc_id, [])
 
-            selected_chunks = doc_chunks[:5] #nur die 3 ersten besten Chunks pro Dokument, damit der Prompt nicht zu lang wird
+            selected_chunks = doc_chunks[:3]    #nur die 3 ersten besten Chunks pro Dokument
             content_parts = []
             used_pages = set()
 
@@ -235,9 +231,9 @@ class Pipeline:
             combined_text = "\n\n".join(content_parts).strip() #Chunks zu einem kompakten Inhaltsblock verbinden
 
             if not combined_text:
-                return "kein relevanter Inhalt für dieses Dokument gefunden"
+                continue #um zu vermeiden ,dass alles kaputtgeht ,wenn ein Dok kein Chunks hat
 
-            #combined_text = combined_text[:2500] #1200 auch 3 Chunks können lang sein. auf 2500 Zeichen begrenzen
+            combined_text = combined_text[:2500] #1200 auch 3 Chunks können lang sein. auf 2500 Zeichen begrenzen
 
             timeline_parts.append( #ein Block für jedes Dok erstellen
                 f"""
@@ -262,7 +258,13 @@ class Pipeline:
 
             sources.append(source_text)
 
+        if not timeline_parts:
+            return "kein relevanter Inhalt für dieses Dokument gefunden"
+
         timeline_context= "\n\n".join(timeline_parts) #chronologisch sortiert: bloc doc1, bloc doc2, ...
+        print(f"KONTEXT BUILD TIME: {time.time() - t0:.2f} s")
+        print(f"Kontextgröße: {len(timeline_context)}")
+
 
         if analyse_mode == "single_document":
             mode_instruction = """
@@ -290,8 +292,7 @@ class Pipeline:
         Zu diesem Vorgang liegen mehrere Dokumente vor.
         Ordne die Informationen strikt chronologisch nach Datum.
         - Verwende NUR Informationen aus den Dokumenten.
-        - Verwende ALLE bereitgestellten Dokumente.
-        - Jedes Dokument muss mindestens einmal in der Antwort vorkommen.
+        - Berücksichtige alle relevanten bereitgestellten Dokumente.
         """
             structure_instruction = """
         Deine Antwort MUSS folgende Punkte enthalten:
@@ -333,9 +334,11 @@ class Pipeline:
         
         Antwort:
         """
-        print(" Prompt wird an LLM geschickt")
+        print(f"Promptgröße: {len(prompt)}")
+
+        t0=time.time()
         response = self.llm.invoke(prompt)
-        print(" LLM Antwort erhalten")
+        print(f"LLM TIME: {time.time() -t0:.2f} s")
 
         unique_sources = []  #Doppelte Quellen entfernen
         seen = set()
@@ -346,6 +349,8 @@ class Pipeline:
                 unique_sources.append(source)
         if unique_sources:
             response += "\n\nQuellen:\n- " + "\n- ".join(unique_sources)
+
+        print(f"--TOTAL TIME--: {time.time()- total_start:.2f} s")
         return response
 
     def _classify_intent(self, user_message: str) -> str:
@@ -363,7 +368,7 @@ class Pipeline:
         ]
 
         vorgang_keywords =[
-            "vorgang", "vorgangs", "verlauf", "entwicklung", "timeline", "wie hat sich das Thema"
+            "vorgang", "vorgangs", "verlauf", "entwicklung", "timeline", "wie hat sich das Thema","wie sich das Thema" ,
             "verfolge", "im zeitverlauf","aktuelle stand" "aktueller stand", "chronologisch","im laufe der zeit", "timeline"
 
         ]
