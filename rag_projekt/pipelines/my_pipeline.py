@@ -88,6 +88,7 @@ class Pipeline:
             return None
 
         best_vorgang, best_score= results[0]  #beste Ergebnisse
+        second_score =results[1][1] if len( results) > 1 else None
 
         print("===== VORGANG SEARCH DEBUG =====")
         for titel, score in results:
@@ -96,8 +97,16 @@ class Pipeline:
             print("-------------------------------")
 
         MAX_DISTANCE = 0.75
+        RELAXED_MAX_DISTANCE = 0.92 #0.95|0.10 läuft nicht im Fall:Unterfinanzierung der Bundesfeuersperrung| best= 0.946692(falsch Antw), second= 1.048964
+        MIN_GAP_TO_SECOND = 0.12
 
-        if best_score > MAX_DISTANCE: #vermeide ,dass ein falscher Vorgang zurückgegeben wird, falls die Top3 alle falsch sind
+        accepted= False
+        if best_score <= MAX_DISTANCE:
+            accepted = True
+        elif ( second_score is not None and best_score <= RELAXED_MAX_DISTANCE and (second_score - best_score) >= MIN_GAP_TO_SECOND ):
+           accepted = True
+
+        if not accepted  : #vermeide ,dass ein falscher Vorgang zurückgegeben wird, falls die Top3 alle falsch sind
             print(f"Kein sicherer Vorgang gefunden. Bester Score: {best_score}")
             return None
 
@@ -169,7 +178,7 @@ class Pipeline:
         t0= time.time()
         documents =self._get_documents_for_vorgang(vorgang_id)  #Zugehörige Dokumente laden
         print(f"VORG-DOCUMENT TIME: {time.time() - t0:.2f} s")
-        print(f"2. {len(documents)} Dokumente geladen")
+        print(f" {len(documents)} Dokumente wurden geladen")
 
         if not documents:
             print(f"TOTAL TIME : {time.time() - total_start:.2f} s")
@@ -183,9 +192,9 @@ class Pipeline:
 
         document_ids  =[doc_id for doc_id, _, _, _, _ in documents]  #IDs der Dokumente sammeln [12,15]
         t0= time.time()
-        relevant_chunks = self._get_relevant_chunks_for_vorgang(user_message,document_ids, k=12) #Alle Chunks dieser Dokumente laden
+        relevant_chunks = self._get_relevant_chunks_for_vorgang(user_message,document_ids, k=6) #Alle Chunks dieser Dokumente laden
         print(f"CHUNKS RETRIVIAL TIME: {time.time() - t0:.2f} s")
-        print(f"3. {len(relevant_chunks)} relevante Chunks gefunden")
+        print(f"{len(relevant_chunks)} relevante Chunks gefunden")
 
         #Chunks pro Dok-id gruppieren [{"chunk_index": 0, "content": "...", "page_number": 1}, ...],
         t0=time.time()
@@ -216,7 +225,16 @@ class Pipeline:
         for doc_id, doc_titel, datum, doc_type, pdf_url in documents:
             doc_chunks = chunks_by_doc.get(doc_id, [])
 
-            selected_chunks = doc_chunks[:3]    #nur die 3 ersten besten Chunks pro Dokument
+            if len(documents) == 1 or len(documents) == 2:
+                selected_chunks = doc_chunks[:3] ##nur die 3 ersten besten Chunks pro Dokument
+                max_chars_per_doc = 2500
+            elif len(documents) == 3:
+                selected_chunks = doc_chunks[:2]
+                max_chars_per_doc = 1600
+            else:
+                selected_chunks = doc_chunks[:2]  #>4 ,4Dok =4800Chunks
+                max_chars_per_doc = 1200
+
             content_parts = []
             used_pages = set()
 
@@ -233,7 +251,7 @@ class Pipeline:
             if not combined_text:
                 continue #um zu vermeiden ,dass alles kaputtgeht ,wenn ein Dok kein Chunks hat
 
-            combined_text = combined_text[:2500] #1200 auch 3 Chunks können lang sein. auf 2500 Zeichen begrenzen
+            combined_text = combined_text[:max_chars_per_doc] #1200 auch 3 Chunks können lang sein. auf 2500 Zeichen begrenzen
 
             timeline_parts.append( #ein Block für jedes Dok erstellen
                 f"""
@@ -291,20 +309,25 @@ class Pipeline:
         Wichtig:
         Zu diesem Vorgang liegen mehrere Dokumente vor.
         Ordne die Informationen strikt chronologisch nach Datum.
-        - Verwende NUR Informationen aus den Dokumenten.
+        - Verwende NUR Informationen aus den Dokumenten und keine Nummerierung.
         - Berücksichtige alle relevanten bereitgestellten Dokumente.
+        - Erfinde keine zusätzlichen Abschnitte.
         """
             structure_instruction = """
-        Deine Antwort MUSS folgende Punkte enthalten:
+        Antworte EXAKT in diesem Format.
         
-        - Beginn: Wie und wann hat der Vorgang begonnen ?
-           
-        - Entwicklung: Beschreibe die weiteren Dokumente chronologisch Schritt für Schritt: Zuerst, Dann,Anschließend).
+        BEGINN:
+        Beschreibe ausschließlich den Start des Vorgangs.
         
-        - Veränderungen: Welche Inhalte, Auschlüsse oder Regelungen im Vorgang haben sich geändert ?
+        ENTWICKLUNG:
+        Beschreibe die chronologische Entwicklung Schritt für Schritt.
         
-        - Aktueller Stand: Was ist der aktuelle Stand des Vorgangs basierend auf dem letzten Dokument ? 
-        """
+        VERÄNDERUNGEN:
+        Beschreibe nur inhaltliche Änderungen, Ergänzungen oder Ausschlüsse.
+        
+        AKTUELLER STAND:
+        Beschreibe ausschließlich den aktuellen Stand basierend auf dem letzten Dokument. 
+                """
 
         prompt = f"""
         Du bist ein KI-Assistent für politische Dokumentenanalyse.
@@ -358,8 +381,9 @@ class Pipeline:
         text = user_message.lower()
 
         system_keywords = [
-            "ich brauche hilfe", "was kannst du", "wer bist du", "wozu dienst du", "wozu du dienst", "dein Ziel" , "deine Rolle",
-            "wie funktionierst du","wie du funktionierst", "wie kann ich dich benutzen", "dich benutzen", "kannst du mir helfen", "hilf mir"
+            "ich brauche hilfe", "was kannst du", "wer bist du", "wozu dienst du", "wozu du dienst", "dein ziel" , "deine rolle", "deine hilfe",
+            "wie funktionierst du","wie du funktionierst", "wie kann ich dich benutzen", "dich benutzen", "kannst du mir helfen", "hilf mir",
+            "deine Kernfunktion", "deine Funktionen", "deine Hauptfunktion"
         ]
 
         summary_keywords= [
@@ -382,7 +406,7 @@ class Pipeline:
         if any(k in text for k in vorgang_keywords):
             return "VORGANG"
 
-        # Fallback rapide et sûr
+        #Fallback
         print("INTENT LLM TIME:", round(time.perf_counter() - classify_start, 2), "s")
         return "DOCUMENT_QA"
 
