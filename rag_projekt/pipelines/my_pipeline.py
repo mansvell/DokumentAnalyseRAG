@@ -225,7 +225,7 @@ class Pipeline:
         for doc_id, doc_titel, datum, doc_type, pdf_url in documents:
             doc_chunks = chunks_by_doc.get(doc_id, [])
 
-            if len(documents) == 1 or len(documents) == 2:
+            if len(documents) == 1 or len(documents) == 2: #Block des 10min
                 selected_chunks = doc_chunks[:3] ##nur die 3 ersten besten Chunks pro Dokument
                 max_chars_per_doc = 2500
             elif len(documents) == 3:
@@ -314,10 +314,10 @@ class Pipeline:
         - Erfinde keine zusätzlichen Abschnitte.
         """
             structure_instruction = """
-        Antworte EXAKT in diesem Format.
+        Antworte EXAKT auf die folgenden 4 Punkte in diesem Format.
         
         BEGINN:
-        Beschreibe ausschließlich den Start des Vorgangs.
+        Beschreibe hier ausschließlich den Start des Vorgangs.
         
         ENTWICKLUNG:
         Beschreibe die chronologische Entwicklung Schritt für Schritt.
@@ -326,7 +326,7 @@ class Pipeline:
         Beschreibe nur inhaltliche Änderungen, Ergänzungen oder Ausschlüsse.
         
         AKTUELLER STAND:
-        Beschreibe ausschließlich den aktuellen Stand basierend auf dem letzten Dokument. 
+        Beschreibe hier ausschließlich den aktuellen Stand basierend auf dem letzten Dokument. 
                 """
 
         prompt = f"""
@@ -383,7 +383,7 @@ class Pipeline:
         system_keywords = [
             "ich brauche hilfe", "was kannst du", "wer bist du", "wozu dienst du", "wozu du dienst", "dein ziel" , "deine rolle", "deine hilfe",
             "wie funktionierst du","wie du funktionierst", "wie kann ich dich benutzen", "dich benutzen", "kannst du mir helfen", "hilf mir",
-            "deine Kernfunktion", "deine Funktionen", "deine Hauptfunktion"
+            "deine kernfunktion", "deine funktionen", "deine hauptfunktion"
         ]
 
         summary_keywords= [
@@ -392,7 +392,7 @@ class Pipeline:
         ]
 
         vorgang_keywords =[
-            "vorgang", "vorgangs", "verlauf", "entwicklung", "timeline", "wie hat sich das Thema","wie sich das Thema" ,
+            "vorgang", "vorgangs", "verlauf", "entwicklung", "timeline", "wie hat sich das thema","wie sich das thema" ,
             "verfolge", "im zeitverlauf","aktuelle stand" "aktueller stand", "chronologisch","im laufe der zeit", "timeline"
 
         ]
