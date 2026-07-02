@@ -11,64 +11,70 @@ DATA_DIR = BASE_DIR / "data" / "vorgang"
 DB_PATH = BASE_DIR / "db" / "dbsqlite" / "think_ai.db"
 
 
-def fetch_vorgaenge(): #Vorgänge aufrufen
+def fetch_vorgaenge(cursor="*"): #Vorgänge aufrufen
     params = {
         "apikey": API_KEY,
         "format": "json",
-        "rows": 20
+        "rows": 20,
+        "cursor": cursor
     }
 
     response = requests.get(BASE_URL, params=params) #schickt Getanfrage an API von DIP - 200
     response.raise_for_status()
     data = response.json()
 
-    return data.get("documents", [])
+    return data.get("documents", []), data.get("cursor")
 
 
 def run():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()  #Erstellung von Cursor,um Anfragen auszuführen
+    cursor_value = "*"
 
-    vorgaenge = fetch_vorgaenge()
+    for _ in range(2):  # 2 x 100 = 200
+        vorgaenge, cursor_value = fetch_vorgaenge(cursor_value)
 
-    for v in vorgaenge: #Extrahiere die Felder jedes Vorgangs
-        dip_id = v.get("id")
-        titel = v.get("titel")
-        vorgangstyp = v.get("vorgangstyp")
-        datum_erstellt = v.get("datum")
-        datum_aktualisiert = v.get("aktualisiert")
+        if not vorgaenge:
+            break
 
-        if not dip_id:
-            continue
+        for v in vorgaenge: #Extrahiere die Felder jedes Vorgangs
+            dip_id = v.get("id")
+            titel = v.get("titel")
+            vorgangstyp = v.get("vorgangstyp")
+            datum_erstellt = v.get("datum")
+            datum_aktualisiert = v.get("aktualisiert")
 
-        cursor.execute("""
-            INSERT OR IGNORE INTO vorgaenge
-            (dip_id, titel, vorgangstyp, datum_erstellt, datum_aktualisiert)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            dip_id,
-            titel,
-            vorgangstyp,
-            datum_erstellt,
-            datum_aktualisiert
-        ))
+            if not dip_id:
+                continue
 
-        cursor.execute("""
-            UPDATE vorgaenge
-            SET titel = ?,
-                vorgangstyp = ?,
-                datum_erstellt = ?,
-                datum_aktualisiert = ?
-            WHERE dip_id = ?
-        """, (
-            titel,
-            vorgangstyp,
-            datum_erstellt,
-            datum_aktualisiert,
-            dip_id
-        ))
+            cursor.execute("""
+                INSERT OR IGNORE INTO vorgaenge
+                (dip_id, titel, vorgangstyp, datum_erstellt, datum_aktualisiert)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                dip_id,
+                titel,
+                vorgangstyp,
+                datum_erstellt,
+                datum_aktualisiert
+            ))
 
-        print(f"Vorgang gespeichert: {titel}")
+            cursor.execute("""
+                UPDATE vorgaenge
+                SET titel = ?,
+                    vorgangstyp = ?,
+                    datum_erstellt = ?,
+                    datum_aktualisiert = ?
+                WHERE dip_id = ?
+            """, (
+                titel,
+                vorgangstyp,
+                datum_erstellt,
+                datum_aktualisiert,
+                dip_id
+            ))
+
+            print(f"Vorgang gespeichert: {titel}")
 
     conn.commit()    #Änderung speichern - Verbindung schließen
     conn.close()
