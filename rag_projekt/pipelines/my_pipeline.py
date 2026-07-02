@@ -9,7 +9,7 @@ import time
 class Pipeline:
     class Valves(BaseModel):
         EMBEDDING_MODEL: str = Field(
-            default="all-MiniLM-L6-v2",
+            default="intfloat/multilingual-e5-base", #all-MiniLM-L6-v2",
             description="Embedding-Modell für die Vektorsuche"
         )
         VECTOR_DB_DIR: str = Field(
@@ -96,9 +96,12 @@ class Pipeline:
             print("Titel:", titel.metadata.get("titel"))
             print("-------------------------------")
 
-        MAX_DISTANCE = 0.75
-        RELAXED_MAX_DISTANCE = 0.92 #0.95|0.10 läuft nicht im Fall:Unterfinanzierung der Bundesfeuersperrung| best= 0.946692(falsch Antw), second= 1.048964
-        MIN_GAP_TO_SECOND = 0.12
+        #MAX_DISTANCE = 0.75
+        #RELAXED_MAX_DISTANCE = 0.92 #0.95|0.10 läuft nicht im Fall:Unterfinanzierung der Bundesfeuersperrung| best= 0.946692(falsch Antw), second= 1.048964
+        #MIN_GAP_TO_SECOND = 0.12
+        MAX_DISTANCE = 0.3
+        RELAXED_MAX_DISTANCE = 0.4
+        MIN_GAP_TO_SECOND = 0.02
 
         accepted= False
         if best_score <= MAX_DISTANCE:
@@ -229,7 +232,7 @@ class Pipeline:
                 selected_chunks = doc_chunks[:3] ##nur die 3 ersten besten Chunks pro Dokument
                 max_chars_per_doc = 2500
             elif len(documents) == 3:
-                selected_chunks = doc_chunks[:2]
+                selected_chunks = doc_chunks[:2] #3Dok->2besten Chunks pro Dok
                 max_chars_per_doc = 1600
             else:
                 selected_chunks = doc_chunks[:2]  #>4 ,4Dok =4800Chunks
@@ -251,7 +254,7 @@ class Pipeline:
             if not combined_text:
                 continue #um zu vermeiden ,dass alles kaputtgeht ,wenn ein Dok kein Chunks hat
 
-            combined_text = combined_text[:max_chars_per_doc] #1200 auch 3 Chunks können lang sein. auf 2500 Zeichen begrenzen
+            combined_text = combined_text[:max_chars_per_doc]
 
             timeline_parts.append( #ein Block für jedes Dok erstellen
                 f"""
@@ -314,20 +317,19 @@ class Pipeline:
         - Erfinde keine zusätzlichen Abschnitte.
         """
             structure_instruction = """
-        Antworte EXAKT auf die folgenden 4 Punkte in diesem Format.
+        Strukturiere deine Antwort wie folgt:
         
-        BEGINN:
+        1. BEGINN
         Beschreibe hier ausschließlich den Start des Vorgangs.
         
-        ENTWICKLUNG:
+        2. ENTWICKLUNG
         Beschreibe die chronologische Entwicklung Schritt für Schritt.
         
-        VERÄNDERUNGEN:
+        3. VERÄNDERUNGEN
         Beschreibe nur inhaltliche Änderungen, Ergänzungen oder Ausschlüsse.
         
-        AKTUELLER STAND:
-        Beschreibe hier ausschließlich den aktuellen Stand basierend auf dem letzten Dokument. 
-                """
+        4. AKTUELLER STAND
+        Beschreibe hier ausschließlich den aktuellen Stand basierend auf dem letzten Dokument"""
 
         prompt = f"""
         Du bist ein KI-Assistent für politische Dokumentenanalyse.
@@ -458,15 +460,6 @@ class Pipeline:
             print("RETRIEVAL TIME:", round(time.perf_counter() - retrieval_start, 2), "s")
 
             print("===== RETRIEVAL DEBUG =====")
-            for i, r in enumerate(results, start=1):
-                metadata = r.metadata if hasattr(r, "metadata") else {}
-                content = r.page_content if hasattr(r, "page_content") else ""
-
-                print(f"\n--- RESULT {i} ---")
-                print("Titel:", metadata.get("titel"))
-                print("Seite:", metadata.get("page_number"))
-                print(content[:800])
-
             #Die Chunks werden nummeriert, damit das LLM diejenigen angeben kann, die es verwendet
             context_start = time.perf_counter()
             numbered_context_parts = []
@@ -475,9 +468,14 @@ class Pipeline:
                 #numbered_context_parts.append(f"[Quelle {i}]\n{content}")
                 content = r.page_content if hasattr(r, "page_content") else str(r)
                 metadata = r.metadata if hasattr(r, "metadata") else {}
-                content = content[:800]
+                #content_l = content[:850]
                 titel = metadata.get("titel", "Ohne Titel")
                 page_number = metadata.get("page_number", "unbekannt")
+
+                print(f"\n--- RESULT {i} ---")
+                print("Titel:", metadata.get("titel"))
+                print("Seite:", metadata.get("page_number"))
+                print(content)
 
                 # So kann das LLM besser erkennen, welche Quelle zu welchem Inhalt gehört.
                 numbered_context_parts.append(f"""

@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 DB_PATH = BASE_DIR / "db" / "dbsqlite" / "think_ai.db"
 VECTOR_PATH = BASE_DIR / "db" / "vector_store_vorgaenge"
 
-embedding = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+embedding = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-base")
 
 def build_vorgang_index():
     #Liest alle Vorgänge aus SQLite und speichert sie als Vektoren in Chroma.
