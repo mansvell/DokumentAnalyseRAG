@@ -1,10 +1,19 @@
-from typing import List
+from typing import List,  Optional
 from pydantic import BaseModel, Field
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import OllamaLLM
 import sqlite3
 import time
+import csv # Evaluationsergebnisse in einer Csv-Datei schreiben
+import os
+
+class E5Embeddings(HuggingFaceEmbeddings):
+    def embed_documents(self, texts):
+        texts = [f"passage: {text}" for text in texts]
+        return super().embed_documents(texts)
+    def embed_query(self, text):
+        return super().embed_query(f"query: {text}")
 
 class Pipeline:
     class Valves(BaseModel):
@@ -26,11 +35,40 @@ class Pipeline:
         )
         TOP_K: int = Field(
             default=4,
-            description="Anzahl der abgerufenen Chunks"
+            description="Anzahl der abgerufenen Chunks in Document_QA"
         )
         SQLITE_DB_PATH: str = Field(  #Vorgg
             default="/app/db/dbsqlite/think_ai.db",
             description="Pfad zur SQLite-Datenbank im Container"
+        )
+
+        DOCUMENT_QA_RETRIEVAL: str = Field(
+            default="similarity", #1-similarity, 2-mmr,3-sore,4-hybrid
+            description="Retrieval für Dokumentfragen: similarity, score, mmr oder hybrid"
+        )
+        VORGANG_CHUNK_RETRIEVAL: str = Field(
+            default="mmr_filtered",
+            description="Chunk-Retrieval für Vorgänge: similarity_filtered oder mmr_filtered"
+        )
+
+        DOCUMENT_QA_SCORE_THRESHOLD: Optional[float] = Field(
+            default=10,
+            description="Distanzschwelle für score-basierte Similarity Search in Doc_QA"
+        )
+
+        EVALUATION_ENABLED: bool = Field( #aktiviert oder deaktiviert die Speicherung der Evaluationsergebnisse (WARM-UP)
+            default=True,
+            description="Evaluationsergebnisse in CSV speichern"
+        )
+
+        EVALUATION_QUESTION_ID: str = Field( #aktuell getestete Evaluationsfrage(DQ01 oder V01)
+            default="DQ03",
+            description="ID der aktuellen Evaluationsfrage"
+        )
+
+        EVALUATION_CSV_PATH: str = Field(  #speicherort Retrieval-Ergebnissen
+            default="/app/evaluation/retrieval_results.csv",
+            description="Pfad zur CSV-Datei für die Retrieval-Evaluation"
         )
 
     def __init__(self):
@@ -41,8 +79,9 @@ class Pipeline:
         self.llm = None
 
     def _init_components(self): ##Initialisiert Embedding, Chroma und LLM nur bei Bedarf
-        self.embedding = HuggingFaceEmbeddings(
-            model_name=self.valves.EMBEDDING_MODEL
+        self.embedding = E5Embeddings(
+            model_name=self.valves.EMBEDDING_MODEL,
+            encode_kwargs={"normalize_embeddings": True}
         )
 
         self.db = Chroma(
@@ -78,6 +117,86 @@ class Pipeline:
                 "name": "Think AI",
             }
         ]
+
+    # MODIF: Speichert genau eine Retrieval-Zeile in der Evaluations-CSV
+    def _append_evaluation_row(self, question_id, scenario, strategy, run, retrieval_time, rank, chunk_id,
+                               document_id, page_number, vorgang_id=""):
+
+        path = self.valves.EVALUATION_CSV_PATH
+
+        # Erstellt den Zielordner automatisch, falls er noch nicht existiert
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        file_exists = os.path.exists(path)
+
+        fieldnames = [
+            "question_id",
+            "scenario",
+            "strategy",
+            "run",
+            "retrieval_time_s",
+            "rank",
+            "chunk_id",
+            "document_id",
+            "page_number",
+            "vorgang_id"
+        ]
+
+        # MODIF: Öffnet die CSV im Append-Modus, damit bestehende Ergebnisse erhalten bleiben
+        with open(path, "a", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=fieldnames
+            )
+
+            # MODIF: Schreibt die Spaltennamen nur beim ersten Erstellen der Datei
+            if not file_exists:
+                writer.writeheader()
+
+            writer.writerow({
+                "question_id": question_id,
+                "scenario": scenario,
+                "strategy": strategy,
+                "run": run,
+                "retrieval_time_s": round(retrieval_time, 6),
+                "rank": rank,
+                "chunk_id": chunk_id,
+                "document_id": document_id,
+                "page_number": page_number,
+                "vorgang_id": vorgang_id
+            })
+
+    # bestimmt automatisch die nächste Run-Nummer für Frage, Szenario und Strategie
+    def _get_next_evaluation_run(self, question_id, scenario, strategy):
+
+        path = self.valves.EVALUATION_CSV_PATH
+
+        # Wenn noch keine CSV existiert, beginnt die erste Messung mit Run 1
+        if not os.path.exists(path):
+            return 1
+
+        max_run = 0
+
+        # ucht den höchsten bereits gespeicherten Run derselben Kombination
+        with open(path, "r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+
+            for row in reader:
+                if (
+                        row.get("question_id") == question_id
+                        and row.get("scenario") == scenario
+                        and row.get("strategy") == strategy
+                ):
+                    try:
+                        max_run = max(
+                            max_run,
+                            int(row.get("run", 0))
+                        )
+                    except ValueError:
+                        continue
+
+        # der nächste Durchlauf erhält die folgende Run-Nummer
+        return max_run + 1
 
 
     def _find_vorgang_semantic(self, user_message: str):
@@ -140,20 +259,38 @@ class Pipeline:
         return results
 
 
+
     #das sucht die relevantesten Chunks für die Nutzerfrage aber nur innerhalb der Dokumente des gefundenen Vorgangs
     def _get_relevant_chunks_for_vorgang(self, user_message: str, document_ids: List[int], k: int = 12):
         if not document_ids:
             return []
 
-        results = self.db.max_marginal_relevance_search(
-            user_message,
-            k=k,
-            fetch_k=40,
-            filter={"document_id": {"$in": document_ids}}
-        ) #40 Kandidaten dann 12 relevanteste davon
+        strategy = self.valves.VORGANG_CHUNK_RETRIEVAL.strip().lower()
+        metadata_filter = {"document_id": {"$in": document_ids}}
 
-        print("====== CHUNK FILTERUNG ======")
-        print("verwendete dokument_ids:", document_ids)
+        print("===== VORGANG CHUNK RETRIEVAL =====")
+        print("Strategie:", strategy)
+        print("verwendete Dokument-IDs:", document_ids)
+        print("k:", k)
+
+        if strategy == "similarity_filtered":
+            results = self.db.similarity_search(
+                user_message,
+                k=k,
+                filter=metadata_filter
+            )
+
+        elif strategy == "mmr_filtered":
+            results = self.db.max_marginal_relevance_search(
+                user_message,
+                k=k,
+                fetch_k=40,
+                filter=metadata_filter
+            )
+        else:
+            raise ValueError(
+                f"Unbekannte VORGANG_CHUNK_RETRIEVAL-Strategie: {strategy}"
+            )
 
         for r in results:
             metadata = r.metadata if hasattr(r, "metadata") else {}
@@ -194,10 +331,48 @@ class Pipeline:
             analyse_mode = "timeline"
 
         document_ids  =[doc_id for doc_id, _, _, _, _ in documents]  #IDs der Dokumente sammeln [12,15]
-        t0= time.time()
+        retrieval_start= time.perf_counter() #t0= time.time()
         relevant_chunks = self._get_relevant_chunks_for_vorgang(user_message,document_ids, k=6) #Alle Chunks dieser Dokumente laden
-        print(f"CHUNKS RETRIVIAL TIME: {time.time() - t0:.2f} s")
+        retrieval_time =time.perf_counter() - retrieval_start #reine Retrieval-Zeit ohne Vorgangssuche und LLM
+        print(f"CHUNKS RETRIVIAL TIME:",round(retrieval_time,2) ,"s")
         print(f"{len(relevant_chunks)} relevante Chunks gefunden")
+
+        if self.valves.EVALUATION_ENABLED and self.valves.EVALUATION_QUESTION_ID.strip(): #Speichert die Retrieval-Ergebnisse nur bei aktivierter VORGANG-Evaluation
+
+            question_id = self.valves.EVALUATION_QUESTION_ID.strip()
+            strategy = self.valves.VORGANG_CHUNK_RETRIEVAL
+
+            run = self._get_next_evaluation_run(question_id,"VORGANG",strategy )
+
+            #Speichert jeden gefundenen Chunk mit Rang, Dokument und Vorgang
+            for rank, result in enumerate(relevant_chunks, start=1):
+                metadata = getattr(result, "metadata", {})
+                self._append_evaluation_row(
+                    question_id=question_id,
+                    scenario="VORGANG",
+                    strategy=strategy,
+                    run=run,
+                    retrieval_time=retrieval_time,
+                    rank=rank,
+                    chunk_id=metadata.get("chunk_id", ""),
+                    document_id=metadata.get("document_id", ""),
+                    page_number=metadata.get("page_number", ""),
+                    vorgang_id=vorgang_id
+                )
+
+            if not relevant_chunks:
+                self._append_evaluation_row(
+                    question_id=question_id,
+                    scenario="VORGANG",
+                    strategy=strategy,
+                    run=run,
+                    retrieval_time=retrieval_time,
+                    rank="",
+                    chunk_id="",
+                    document_id="",
+                    page_number="",
+                    vorgang_id=vorgang_id
+                )
 
         #Chunks pro Dok-id gruppieren [{"chunk_index": 0, "content": "...", "page_number": 1}, ...],
         t0=time.time()
@@ -378,6 +553,67 @@ class Pipeline:
         print(f"--TOTAL TIME--: {time.time()- total_start:.2f} s")
         return response
 
+
+
+    def _retrieval_document_qa(self, user_message: str, k: int):
+        strategy = self.valves.DOCUMENT_QA_RETRIEVAL.strip().lower()
+
+        print("===== DOCUMENT QA RETRIEVAL =====")
+        print("Strategie:", strategy)
+        print("k:", k)
+
+        if strategy== "similarity":
+            return self.db.similarity_search(
+                user_message,
+                k=k
+            )
+
+        elif strategy =="score":
+            threshold =self.valves.DOCUMENT_QA_SCORE_THRESHOLD
+
+            if threshold is None:
+                raise ValueError(
+                    "Für die score-basierte Similarity Search muss "
+                    "DOCUMENT_QA_SCORE_THRESHOLD festgelegt werden."
+                )
+
+            scored_results= self.db.similarity_search_with_score(user_message,k=k)
+            results = []
+
+            for document, score in scored_results:
+                print(
+                    "Score:",score,
+                    "| Titel:",document.metadata.get("titel"),
+                    "| Seite:",document.metadata.get("page_number")
+                )
+
+                if score <= threshold:
+                    results.append(document)
+
+            print("Score-Threshold:", threshold)
+            print("Akzeptierte Treffer:", len(results))
+
+            return results
+
+        elif strategy == "mmr":
+            return self.db.max_marginal_relevance_search(
+                user_message,
+                k=k,
+                fetch_k=20,
+                lambda_mult=0.9
+            )
+
+        elif strategy == "hybrid":
+            raise NotImplementedError(
+                "Hybrid Retrieval wird im nächsten Schritt ergänzt."
+            )
+
+        else:
+            raise ValueError(
+                f"Unbekannte DOCUMENT_QA_RETRIEVAL-Strategie: {strategy}"
+            )
+
+
     def _classify_intent(self, user_message: str) -> str:
         classify_start = time.perf_counter()
         text = user_message.lower()
@@ -430,6 +666,7 @@ class Pipeline:
             print("INTENT TIME:", round(time.perf_counter() - intent_start, 2), "s")
             print("USER MESSAGE:", user_message)
             print("CLASSIFIED INTENT:", intent)
+            print("EVALUATION:",self.valves.EVALUATION_ENABLED,"| QUESTION_ID:",self.valves.EVALUATION_QUESTION_ID,"| CSV:",self.valves.EVALUATION_CSV_PATH)
 
             if intent == "SYSTEM_HELP":     #Hilfe für Nutzer
                 return """
@@ -451,13 +688,56 @@ class Pipeline:
 
             #results = self.db.similarity_search(user_message, k=kk)
             retrieval_start = time.perf_counter()
-            results = self.db.max_marginal_relevance_search(
-                user_message,
-                k=kk,
-                fetch_k=20,
-                lambda_mult=0.9
+            results = self._retrieval_document_qa(
+                    user_message,
+                    k=kk
             )
-            print("RETRIEVAL TIME:", round(time.perf_counter() - retrieval_start, 2), "s")
+
+            retrieval_time= time.perf_counter() - retrieval_start
+            print("RETRIEVAL TIME:",round(retrieval_time, 2), "s")
+
+            #Speichert Retrieval-Ergebnisse nur bei aktivierter DOCUMENT_QA-Evaluation
+            if intent== "DOCUMENT_QA" and self.valves.EVALUATION_ENABLED and self.valves.EVALUATION_QUESTION_ID.strip():
+
+                question_id = self.valves.EVALUATION_QUESTION_ID.strip()
+                strategy = self.valves.DOCUMENT_QA_RETRIEVAL
+
+                #Bestimmt einmal die Run-Nummer für den gesamten Retrieval-Durchlauf
+                run = self._get_next_evaluation_run(
+                    question_id,
+                    "DOCUMENT_QA",
+                    strategy
+                )
+
+                #Speichert jeden zurückgegebenen Chunk mit seinem Retrieval-Rang
+                for rank, result in enumerate(results, start=1):
+                    metadata = getattr(result, "metadata", {})
+
+                    self._append_evaluation_row(
+                        question_id=question_id,
+                        scenario="DOCUMENT_QA",
+                        strategy=strategy,
+                        run=run,
+                        retrieval_time=retrieval_time,
+                        rank=rank,
+                        chunk_id=metadata.get("chunk_id", ""),
+                        document_id=metadata.get("document_id", ""),
+                        page_number=metadata.get("page_number", "")
+                    )
+
+                #Speichert auch einen Durchlauf, bei dem kein Chunk gefunden wurde
+                if not results:
+                    self._append_evaluation_row(
+                        question_id=question_id,
+                        scenario="DOCUMENT_QA",
+                        strategy=strategy,
+                        run=run,
+                        retrieval_time=retrieval_time,
+                        rank="",
+                        chunk_id="",
+                        document_id="",
+                        page_number=""
+                    )
 
             print("===== RETRIEVAL DEBUG =====")
             #Die Chunks werden nummeriert, damit das LLM diejenigen angeben kann, die es verwendet
@@ -641,3 +921,4 @@ class Pipeline:
 
         except Exception as e:
             return f"Fehler im Pipeline-Modell: {str(e)}"
+
