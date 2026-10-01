@@ -1,16 +1,31 @@
 import sqlite3
 from pathlib import Path
 import uuid
-
+import time
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+
+# MODIF
+class E5Embeddings(HuggingFaceEmbeddings):
+    def embed_documents(self, texts):
+        texts = [f"passage: {text}" for text in texts]
+        return super().embed_documents(texts)
+
+    def embed_query(self, text):
+        return super().embed_query(f"query: {text}")
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 
 DB_PATH = BASE_DIR / "db" / "dbsqlite" / "think_ai.db"
 VECTOR_PATH = BASE_DIR / "db" / "vector_store"
 
-embedding = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-base")#all-MiniLM-L6-v2
+embedding = E5Embeddings(
+    model_name="intfloat/multilingual-e5-base",
+    encode_kwargs={
+        "normalize_embeddings": True,
+        "batch_size": 32}
+)#all-MiniLM-L6-v2 zum speichern und unterscheiden von passage und query beim Vektorisieren
 
 
 def build_index():
@@ -49,7 +64,7 @@ def build_index():
         chroma_id = str(uuid.uuid4()) #generiere ein zufälliges String sichtbar in Chroma_id in sqlite
 
         texts.append(content)
-        metadatas.append({
+        metadatas.append({ #RAG kann angeben,dass diese Information aus diesem Dokument stammt, Seite 4, mit der entsprechenden PDF-URL
             "chunk_id": chunk_id,
             "document_id": document_id,
             "page_number": page_number if page_number is not None else "",
@@ -67,8 +82,14 @@ def build_index():
         embedding_function=embedding
     )
 
-    BATCH_SIZE = 5000        #ich sende die Chunks in Stücke von 5000 ,um eine Überschreitung zu vermeiden
+    BATCH_SIZE = 500        #ich sende die Chunks in Stücke von 5000 ,um eine Überschreitung zu vermeiden
                             # um nicht alle 74745 auf einmal zu senden. max batch size of 5461
+
+    # MODIF: Startzeit für Fortschrittsanzeige und Restzeitschätzung
+    total_chunks = len(texts)
+    start_time = time.perf_counter()
+    print(f"\nIndexierung gestartet: {total_chunks} Chunks")
+
     for i in range(0, len(texts), BATCH_SIZE):
         batch_texts = texts[i:i + BATCH_SIZE]
         batch_metadatas = metadatas[i:i + BATCH_SIZE]
@@ -78,6 +99,24 @@ def build_index():
             texts=batch_texts,
             metadatas=batch_metadatas,
             ids=batch_ids
+        )
+        #Berechnet den bisherigen Fortschritt und die geschätzte Restzeit
+        processed = min(i + BATCH_SIZE, total_chunks)
+
+        elapsed = time.perf_counter() - start_time
+        progress = processed / total_chunks
+
+        remaining = (
+            elapsed / progress - elapsed
+            if progress > 0
+            else 0
+        )
+
+        print(
+            f"[{processed}/{total_chunks}] "
+            f"{progress * 100:.2f}% | "
+            f"Vergangen: {elapsed / 60:.1f} min | "
+            f"Rest ca.: {remaining / 60:.1f} min"
         )
 
     for i, (chunk_id, *_rest) in enumerate(rows):     #Chroma_id in sqlite speichern(in jeder Chunk)
