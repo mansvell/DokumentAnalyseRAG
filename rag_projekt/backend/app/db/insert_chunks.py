@@ -1,6 +1,6 @@
-#créer et enregistrer les chunks dans SQLite
-#lire chaque PDF déjà enregistré dans documents
-#effectuer les chunks et speichern en DB
+#Chunks erstellen und in SQLite speichern
+#Jedes bereits in „Dokumente“ gespeicherte PDF lesen
+#Chunks ausführen und in der Datenbank speichern
 import sqlite3
 from pathlib import Path
 import fitz
@@ -28,8 +28,8 @@ def insert_chunks():
     cursor = conn.cursor()
 
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
+        chunk_size=800,
+        chunk_overlap=300
     )
 
     cursor.execute("SELECT id, filepath FROM documents")
