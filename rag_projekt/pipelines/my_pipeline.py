@@ -7,6 +7,11 @@ import sqlite3
 import time
 import csv # Evaluationsergebnisse in einer Csv-Datei schreiben
 import os
+import re
+import heapq
+
+from rank_bm25 import BM25Okapi
+from langchain_core.documents import Document
 
 class E5Embeddings(HuggingFaceEmbeddings):
     def embed_documents(self, texts):
@@ -43,7 +48,7 @@ class Pipeline:
         )
 
         DOCUMENT_QA_RETRIEVAL: str = Field(
-            default="similarity", #1-similarity, 2-mmr,3-sore,4-hybrid
+            default="hybrid", #1-similarity, 2-mmr,3-sore,4-hybrid
             description="Retrieval für Dokumentfragen: similarity, score, mmr oder hybrid"
         )
         VORGANG_CHUNK_RETRIEVAL: str = Field(
@@ -52,17 +57,26 @@ class Pipeline:
         )
 
         DOCUMENT_QA_SCORE_THRESHOLD: Optional[float] = Field(
-            default=10,
+            default=0.29,
             description="Distanzschwelle für score-basierte Similarity Search in Doc_QA"
         )
 
+        HYBRID_FETCH_K: int = Field(
+            default=20,
+            description="Anzahl der Kandidaten pro Retrieval-Zweig beim Hybrid Retrieval"
+        )
+        HYBRID_RRF_CONSTANT: int = Field(
+            default=60,
+            description="Konstante für Reciprocal Rank Fusion"
+        )
+
         EVALUATION_ENABLED: bool = Field( #aktiviert oder deaktiviert die Speicherung der Evaluationsergebnisse (WARM-UP)
-            default=True,
+            default=False,
             description="Evaluationsergebnisse in CSV speichern"
         )
 
         EVALUATION_QUESTION_ID: str = Field( #aktuell getestete Evaluationsfrage(DQ01 oder V01)
-            default="DQ03",
+            default="DQ01",
             description="ID der aktuellen Evaluationsfrage"
         )
 
@@ -77,6 +91,8 @@ class Pipeline:
         self.embedding = None
         self.db = None
         self.llm = None
+        self.bm25 = None
+        self.bm25_documents = []
 
     def _init_components(self): ##Initialisiert Embedding, Chroma und LLM nur bei Bedarf
         self.embedding = E5Embeddings(
@@ -97,6 +113,95 @@ class Pipeline:
             persist_directory="/app/db/vector_store_vorgaenge",
             embedding_function=self.embedding
         )
+        if self.valves.DOCUMENT_QA_RETRIEVAL.strip().lower() == "hybrid":
+            self._init_bm25()
+
+    def _tokenize_bm25(self, text: str):#Einfache und reproduzierbare Tokenisierung für BM25.
+        #Groß-/Kleinschreibung wird vereinheitlicht und Satzzeichen entfernt.
+        if not text:
+            return []
+
+        return re.findall(
+            r"\b\w+\b",
+            text.casefold(),
+            flags=re.UNICODE
+        )
+
+
+    def _init_bm25(self):#Erstellt den BM25-Index aus denselben Chunks,#die auch im Chroma-Vektorindex vorhanden sind.
+        print("===== BM25 INITIALISIERUNG =====")
+
+        conn = sqlite3.connect(self.valves.SQLITE_DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                c.id,
+                c.content,
+                c.document_id,
+                c.page_number,
+                d.titel,
+                d.datum,
+                d.doc_type,
+                d.source_org,
+                d.pdf_url,
+                d.vorgang_id
+            FROM chunks c
+            JOIN documents d
+                ON c.document_id = d.id
+            WHERE c.chroma_id IS NOT NULL
+            ORDER BY c.id ASC
+        """)
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            raise ValueError(
+                "Für BM25 wurden keine indexierten Chunks in SQLite gefunden."
+            )
+
+        self.bm25_documents = []
+        tokenized_corpus = []
+
+        for row in rows:
+            (
+                chunk_id,
+                content,
+                document_id,
+                page_number,
+                titel,
+                datum,
+                doc_type,
+                source_org,
+                pdf_url,
+                vorgang_id
+            ) = row
+
+            document = Document(
+                page_content=content,
+                metadata={
+                    "chunk_id": chunk_id,
+                    "document_id": document_id,
+                    "page_number": page_number,
+                    "titel": titel,
+                    "datum": datum,
+                    "doc_type": doc_type,
+                    "source_org": source_org,
+                    "pdf_url": pdf_url,
+                    "vorgang_id": vorgang_id
+                }
+            )
+
+            self.bm25_documents.append(document)
+            tokenized_corpus.append(
+                self._tokenize_bm25(content)
+            )
+
+        self.bm25 = BM25Okapi(tokenized_corpus)
+
+        print("BM25-Chunks:", len(self.bm25_documents))
+        print("===== BM25 BEREIT =====")
 
     async def on_startup(self):
         print(f"on_startup: {__name__}")
@@ -109,6 +214,8 @@ class Pipeline:
         self.embedding = None
         self.db = None
         self.llm = None
+        self.bm25 = None#
+        self.bm25_documents = []#
 
     def pipelines(self) -> List[dict]:
         return [
@@ -117,6 +224,150 @@ class Pipeline:
                 "name": "Think AI",
             }
         ]
+
+    def _bm25_search(self, user_message: str, k: int = 20):
+        if self.bm25 is None:
+            raise RuntimeError("BM25 wurde noch nicht initialisiert.")
+
+        query_tokens = self._tokenize_bm25(user_message)
+
+        if not query_tokens:
+            return []
+
+        scores = self.bm25.get_scores(query_tokens)
+
+        # Nur Dokumente berücksichtigen, bei denen überhaupt
+        # ein lexikalischer Treffer vorliegt.
+        matching_indices = [
+            i
+            for i, score in enumerate(scores)
+            if float(score) != 0.0
+        ]
+
+        top_indices = heapq.nlargest(
+            min(k, len(matching_indices)),
+            matching_indices,
+            key=lambda i: scores[i]
+        )
+
+        results = []
+
+        for index in top_indices:
+            document = self.bm25_documents[index]
+            score = float(scores[index])
+
+            results.append((document, score))
+
+        return results
+
+    def _hybrid_retrieval(self, user_message: str, k: int = 4):
+        fetch_k = self.valves.HYBRID_FETCH_K
+        rrf_constant = self.valves.HYBRID_RRF_CONSTANT
+
+        if self.bm25 is None:
+            self._init_bm25()
+
+        # 1. Dense Retrieval
+        dense_results = self.db.similarity_search(
+            user_message,
+            k=fetch_k
+        )
+
+        # 2. Lexikalisches BM25 Retrieval
+        bm25_results = self._bm25_search(
+            user_message,
+            k=fetch_k
+        )
+
+        # chunk_id -> RRF-Score
+        rrf_scores = {}
+
+        # chunk_id -> Document
+        documents = {}
+
+        # Debug / spätere Nachvollziehbarkeit
+        dense_ranks = {}
+        bm25_ranks = {}
+
+        # Dense-Ranking in RRF einbringen
+        for rank, document in enumerate(dense_results, start=1):
+            chunk_id = document.metadata.get("chunk_id")
+
+            if chunk_id is None:
+                continue
+
+            chunk_key = str(chunk_id)
+
+            documents[chunk_key] = document
+            dense_ranks[chunk_key] = rank
+
+            rrf_scores[chunk_key] = (
+                rrf_scores.get(chunk_key, 0.0)
+                + 1.0 / (rrf_constant + rank)
+            )
+
+        # BM25-Ranking in RRF einbringen
+        for rank, (document, bm25_score) in enumerate(
+            bm25_results,
+            start=1
+        ):
+            chunk_id = document.metadata.get("chunk_id")
+
+            if chunk_id is None:
+                continue
+
+            chunk_key = str(chunk_id)
+
+            if chunk_key not in documents:
+                documents[chunk_key] = document
+
+            bm25_ranks[chunk_key] = rank
+
+            rrf_scores[chunk_key] = (
+                rrf_scores.get(chunk_key, 0.0)
+                + 1.0 / (rrf_constant + rank)
+            )
+
+        # Reproduzierbare Sortierung:
+        # zuerst RRF-Score, danach chunk_id als Tie-Breaker
+        ranked_chunk_ids = sorted(
+            rrf_scores.keys(),
+            key=lambda chunk_id: (
+                -rrf_scores[chunk_id],
+                int(chunk_id) if chunk_id.isdigit() else float("inf"),
+                chunk_id
+            )
+        )
+
+        final_chunk_ids = ranked_chunk_ids[:k]
+
+        results = [
+            documents[chunk_id]
+            for chunk_id in final_chunk_ids
+        ]
+
+        print("===== HYBRID RETRIEVAL / RRF =====")
+        print("Dense Kandidaten:", len(dense_results))
+        print("BM25 Kandidaten:", len(bm25_results))
+        print("RRF-Konstante:", rrf_constant)
+
+        for final_rank, chunk_id in enumerate(
+            final_chunk_ids,
+            start=1
+        ):
+            document = documents[chunk_id]
+
+            print(
+                f"Rank: {final_rank} | "
+                f"RRF: {rrf_scores[chunk_id]:.6f} | "
+                f"Chunk-ID: {chunk_id} | "
+                f"Dense-Rank: {dense_ranks.get(chunk_id, '-')} | "
+                f"BM25-Rank: {bm25_ranks.get(chunk_id, '-')} | "
+                f"Document-ID: {document.metadata.get('document_id')} | "
+                f"Seite: {document.metadata.get('page_number')}"
+            )
+
+        return results
 
     # MODIF: Speichert genau eine Retrieval-Zeile in der Evaluations-CSV
     def _append_evaluation_row(self, question_id, scenario, strategy, run, retrieval_time, rank, chunk_id,
@@ -573,8 +824,7 @@ class Pipeline:
 
             if threshold is None:
                 raise ValueError(
-                    "Für die score-basierte Similarity Search muss "
-                    "DOCUMENT_QA_SCORE_THRESHOLD festgelegt werden."
+                    "Für die score-basierte Similarity Search muss DOCUMENT_QA_SCORE_THRESHOLD festgelegt werden"
                 )
 
             scored_results= self.db.similarity_search_with_score(user_message,k=k)
@@ -604,9 +854,7 @@ class Pipeline:
             )
 
         elif strategy == "hybrid":
-            raise NotImplementedError(
-                "Hybrid Retrieval wird im nächsten Schritt ergänzt."
-            )
+            return self._hybrid_retrieval( user_message, k=k)
 
         else:
             raise ValueError(
