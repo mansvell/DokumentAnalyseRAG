@@ -52,7 +52,7 @@ class Pipeline:
             description="Retrieval für Dokumentfragen: similarity, score, mmr oder hybrid"
         )
         VORGANG_CHUNK_RETRIEVAL: str = Field(
-            default="mmr_filtered",
+            default="mmr_filtered",  #similarity_filtered
             description="Chunk-Retrieval für Vorgänge: similarity_filtered oder mmr_filtered"
         )
 
@@ -71,12 +71,12 @@ class Pipeline:
         )
 
         EVALUATION_ENABLED: bool = Field( #aktiviert oder deaktiviert die Speicherung der Evaluationsergebnisse (WARM-UP)
-            default=False,
+            default=True,
             description="Evaluationsergebnisse in CSV speichern"
         )
 
         EVALUATION_QUESTION_ID: str = Field( #aktuell getestete Evaluationsfrage(DQ01 oder V01)
-            default="DQ01",
+            default="V03",
             description="ID der aktuellen Evaluationsfrage"
         )
 
@@ -165,18 +165,7 @@ class Pipeline:
         tokenized_corpus = []
 
         for row in rows:
-            (
-                chunk_id,
-                content,
-                document_id,
-                page_number,
-                titel,
-                datum,
-                doc_type,
-                source_org,
-                pdf_url,
-                vorgang_id
-            ) = row
+            (chunk_id,content,document_id,page_number,titel,datum,doc_type,source_org,pdf_url,vorgang_id) = row
 
             document = Document(
                 page_content=content,
@@ -512,46 +501,53 @@ class Pipeline:
 
 
     #das sucht die relevantesten Chunks für die Nutzerfrage aber nur innerhalb der Dokumente des gefundenen Vorgangs
-    def _get_relevant_chunks_for_vorgang(self, user_message: str, document_ids: List[int], k: int = 12):
+    def _get_relevant_chunks_for_vorgang(self, user_message: str, document_ids: List[int], k_per_document: int = 12):
         if not document_ids:
             return []
 
         strategy = self.valves.VORGANG_CHUNK_RETRIEVAL.strip().lower()
-        metadata_filter = {"document_id": {"$in": document_ids}}
+        all_results = []
 
         print("===== VORGANG CHUNK RETRIEVAL =====")
         print("Strategie:", strategy)
         print("verwendete Dokument-IDs:", document_ids)
-        print("k:", k)
+        print("k pro Dokument:", k_per_document)
 
-        if strategy == "similarity_filtered":
-            results = self.db.similarity_search(
-                user_message,
-                k=k,
-                filter=metadata_filter
-            )
+        # Jedes Dokument wird separat durchsucht.
+        # Dadurch kann kein einzelnes Dokument den gesamten Retrieval-Kontext dominieren.
+        for document_id in document_ids:
+            metadata_filter = {"document_id": document_id}
 
-        elif strategy == "mmr_filtered":
-            results = self.db.max_marginal_relevance_search(
-                user_message,
-                k=k,
-                fetch_k=40,
-                filter=metadata_filter
-            )
-        else:
-            raise ValueError(
-                f"Unbekannte VORGANG_CHUNK_RETRIEVAL-Strategie: {strategy}"
-            )
+            if strategy == "similarity_filtered":
+                results = self.db.similarity_search(
+                    user_message,
+                    k=k_per_document,
+                    filter=metadata_filter
+                )
 
-        for r in results:
-            metadata = r.metadata if hasattr(r, "metadata") else {}
-            print(
-                "doc_id:", metadata.get("document_id"),
-                "| page:", metadata.get("page_number"),
-                "| chunk:", metadata.get("chunk_id")
-            )
+            elif strategy == "mmr_filtered":
+                results = self.db.max_marginal_relevance_search(
+                    user_message,
+                    k=k_per_document,
+                    fetch_k=40,
+                    lambda_mult=0.9,
+                    filter=metadata_filter
+                )
+            else:
+                raise ValueError(
+                    f"Unbekannte VORGANG_CHUNK_RETRIEVAL-Strategie: {strategy}"
+                )
+            print(f"--- Dokument {document_id} ---")
 
-        return results
+            for r in results:
+                metadata = r.metadata if hasattr(r, "metadata") else {}
+                print(
+                    "doc_id:", metadata.get("document_id"),
+                    "| page:", metadata.get("page_number"),
+                    "| chunk:", metadata.get("chunk_id")
+                )
+            all_results.extend(results)
+        return all_results
 
     #baut aus den Dokumenten + Chunks eine Vorgangs-Zusammenfassung
     def _handle_vorgang_request(self, user_message: str):
@@ -582,8 +578,17 @@ class Pipeline:
             analyse_mode = "timeline"
 
         document_ids  =[doc_id for doc_id, _, _, _, _ in documents]  #IDs der Dokumente sammeln [12,15]
+        # Anzahl der Chunks pro Dokument abhängig von der Anzahl
+        # der zum Vorgang gehörenden Dokumente
+        if len(documents) <= 2:
+            k_per_document = 4
+        elif len(documents) == 3:
+            k_per_document = 3
+        else:
+            k_per_document = 2
+
         retrieval_start= time.perf_counter() #t0= time.time()
-        relevant_chunks = self._get_relevant_chunks_for_vorgang(user_message,document_ids, k=6) #Alle Chunks dieser Dokumente laden
+        relevant_chunks = self._get_relevant_chunks_for_vorgang(user_message,document_ids, k_per_document=k_per_document) #Alle Chunks dieser Dokumente laden
         retrieval_time =time.perf_counter() - retrieval_start #reine Retrieval-Zeit ohne Vorgangssuche und LLM
         print(f"CHUNKS RETRIVIAL TIME:",round(retrieval_time,2) ,"s")
         print(f"{len(relevant_chunks)} relevante Chunks gefunden")
@@ -655,14 +660,14 @@ class Pipeline:
             doc_chunks = chunks_by_doc.get(doc_id, [])
 
             if len(documents) == 1 or len(documents) == 2: #Block des 10min
-                selected_chunks = doc_chunks[:3] ##nur die 3 ersten besten Chunks pro Dokument
-                max_chars_per_doc = 2500
+                selected_chunks = doc_chunks[:4] ##nur die 3 ersten besten Chunks pro Dokument
+                max_chars_per_doc = 3200
             elif len(documents) == 3:
-                selected_chunks = doc_chunks[:2] #3Dok->2besten Chunks pro Dok
-                max_chars_per_doc = 1600
+                selected_chunks = doc_chunks[:3] #3Dok->2besten Chunks pro Dok
+                max_chars_per_doc = 2400
             else:
                 selected_chunks = doc_chunks[:2]  #>4 ,4Dok =4800Chunks
-                max_chars_per_doc = 1200
+                max_chars_per_doc = 1600
 
             content_parts = []
             used_pages = set()
